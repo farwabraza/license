@@ -18,7 +18,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from common import DATA, save_json
+from common import DATA, canonical_section, save_json
 
 SOURCES = DATA / "sources"
 SOURCES.mkdir(parents=True, exist_ok=True)
@@ -113,114 +113,194 @@ def extract_manual(path: Path):
 
 
 # ---------------------------------------------------------------- Neca listato PDF
+#
+# pypdf does not emit a page in reading order. On most pages the block header ("Ciclomotori Blocco: 11023")
+# comes before its questions, but on about a quarter of them it comes AFTER them, long titles wrap so that
+# "Blocco: 13010" sits alone on its line, and a block that runs over a page repeats its header at the bottom
+# of the continuation page. So the listato is parsed one page at a time: statements are grouped by their
+# "DOMANDE VERE" heading and matched to the page's headers by order, wherever the headers were printed.
 
 MARGIN_LABELS = {"I VEICOLI", "LA STRADA", "SEGNALETICA STRADALE", "EQUIPAGGIAMENTO DEI VEICOLI", "NORME DI COMPORTAMENTO",
                  "DOCUMENTI", "INCIDENTI E ASSICURAZIONE", "PRIMO SOCCORSO", "SICUREZZA E INQUINAMENTO", "IL VEICOLO A MOTORE"}
-RE_BLOCK = re.compile(r"^(?P<title>.+?)\s+Blocco:\s*(?P<id>\d{4,6})\s*$")
-RE_Q = re.compile(r"^(?P<n>\d{1,2})\s*[•·]\s*(?P<text>.*)$")
-RE_FIG = re.compile(r"^(Figura\s+\d+\s*)+$")
+BULLETS = "•·●▪\ufffd"          # \ufffd: a bullet pypdf could not decode
+RE_BLOCK = re.compile(r"^(?P<title>.*?)\s*Blocco:\s*(?P<id>\d{4,6})\s*$")
+RE_Q = re.compile(rf"^(?P<n>\d(?: ?\d)?)\s*[{BULLETS}]\s*(?P<text>.*)$")      # "1 1 •" is 11 on one page
+RE_BULLET_ONLY = re.compile(rf"^[{BULLETS}]\s*(?P<text>.*)$")
+RE_FIG = re.compile(r"^(Figura\s+\d+(?:/\d+)*\s*)+$")
 RE_PAGE = re.compile(r"^\d{1,3}$")
-RE_POL = re.compile(r"^\s*DOMANDE\s+(VERE|FALSE)\s*$")
+RE_POL = re.compile(r"^DOMANDE\s+(VERE|FALSE)$")
 
 
-def pdf_text(path: Path) -> str:
+def pdf_pages(path: Path) -> list[str]:
     try:
         from pypdf import PdfReader
     except ImportError:
         raise SystemExit("pip install pypdf  (it is in requirements.txt)")
     reader = PdfReader(str(path))
-    return "\n".join((page.extract_text() or "") for page in reader.pages)
+    return [(page.extract_text() or "") for page in reader.pages]
 
 
-def parse_listato(text: str):
-    sections, current_section, block, polarity, q = [], None, None, None, None
-    blocks = []
+def _clean(line: str) -> str:
+    return re.sub(r"\s+", " ", line).strip()
 
-    def close_q():
-        nonlocal q
-        if q is not None:
-            q["text"] = re.sub(r"\s+", " ", q["text"]).strip()
-            if q["text"]:
-                block["questions"].append(q)
-        q = None
 
-    def close_block():
-        nonlocal block
-        close_q()
-        if block is not None and block["questions"]:
-            blocks.append(block)
-        block = None
-
-    started, last_upper, page_blocks, page = False, None, [], 0
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if not started:
-            if RE_BLOCK.match(line):
-                started = True
-                current_section = last_upper
-                if current_section:
-                    sections.append(current_section)
-            else:
-                if line.isupper() and len(line) > 3 and line not in MARGIN_LABELS:
-                    last_upper = line
-                continue                                  # skip cover + index
-        if line in MARGIN_LABELS:
-            continue
-        if RE_PAGE.match(line):
-            page_blocks = []                              # figures listed on a page belong to that page's blocks
-            page += 1
+def _page_events(lines):
+    """One page's lines → a list of (kind, value) events, page furniture removed."""
+    lines = [_clean(x) for x in lines]
+    lines = [x for x in lines if x]
+    ev, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+        if re.fullmatch(r"\d{1,2}", line) and i < len(lines) and RE_BULLET_ONLY.match(lines[i]):
+            line = f"{line} • {RE_BULLET_ONLY.match(lines[i]).group('text')}"     # number and bullet on separate lines
+            i += 1
+        if line.endswith("Figura") and line.startswith("Figura") and i < len(lines) and re.fullmatch(r"[\d/ ]+", lines[i]):
+            line = f"{line} {lines[i]}"                     # "Figura 127 Figura" / "927/929/967"
+            i += 1
+        if line in MARGIN_LABELS or RE_PAGE.fullmatch(line):
             continue
         m = RE_BLOCK.match(line)
         if m:
-            close_block()
-            block = {"section": current_section, "title": m.group("title").strip(), "block": m.group("id"),
-                     "page": page, "figures": [], "questions": []}
+            title = m.group("title").strip()
+            if not title:                                   # wrapped title: its lines were read as statement text
+                parts = []
+                while ev and ev[-1][0] == "cont" and len(parts) < 2:
+                    parts.insert(0, ev.pop()[1])
+                title = " ".join(parts)
+            ev.append(("header", {"id": m.group("id"), "title": _clean(title)}))
+        elif RE_FIG.match(line):
+            ev.append(("fig", [int(x) for x in re.findall(r"\d+", line)]))
+        elif RE_POL.match(line):
+            ev.append(("pol", RE_POL.match(line).group(1) == "VERE"))
+        elif line.isupper() and canonical_section(line):     # running head (fuzzy: the PDF spells some two ways)
+            ev.append(("section", canonical_section(line)))
+        elif RE_Q.match(line):
+            qm = RE_Q.match(line)
+            ev.append(("q", {"n": int(qm.group("n").replace(" ", "")), "text": qm.group("text")}))
+        else:
+            ev.append(("cont", line))                        # wrapped piece of the previous statement
+    return ev
+
+
+def parse_listato(pages):
+    """pages: list of page texts → (sections in order, blocks, warnings)."""
+    sections, blocks, warnings, by_id = [], [], [], {}
+    current, polarity, section, started = None, None, None, False
+
+    def new_block(h, page_no):
+        if h["id"] not in by_id:                             # a block printed twice keeps collecting into the first
+            by_id[h["id"]] = {"section": section, "title": h["title"], "block": h["id"], "page": page_no,
+                              "figures": [], "questions": []}
+            blocks.append(by_id[h["id"]])
+        return by_id[h["id"]]
+
+    for page_no, text in enumerate(pages, start=1):
+        ev = _page_events(text.splitlines())
+        headers = [v for k, v in ev if k == "header"]
+        if not started:
+            if not headers:
+                continue                                     # cover + index
+            started = True
+        for k, v in ev:
+            if k == "section":
+                section = v
+                if v not in sections:
+                    sections.append(v)
+        figs = []
+        for k, v in ev:
+            if k == "fig":
+                figs += [f for f in v if f not in figs]
+
+        # headers that start a new block (a repeat of the block being continued, printed at the page foot, is not new)
+        fresh = []
+        for h in headers:
+            if (current is None or h["id"] != current["block"]) and all(h["id"] != x["id"] for x in fresh):
+                fresh.append(h)
+
+        # the page's statements: a leading run continuing the previous block, then one run per block started here.
+        # A block starts at "DOMANDE VERE"; at a second "DOMANDE FALSE" (some blocks have only false statements);
+        # or where numbering drops back to 1 inside a false list (the VERE label is missing from a few pages' text).
+        prev = current["questions"] if current else []
+        runs = [{"pol": polarity, "items": []}]
+        pol, has_false, last_n = polarity, any(not q["answer"] for q in prev), (prev[-1]["n"] if prev else 0)
+        for k, v in ev:
+            if k == "pol":
+                if v or has_false:
+                    runs.append({"pol": v, "items": []})
+                else:
+                    runs[-1]["items"].append((k, v))
+                pol, has_false, last_n = v, not v, 0
+            elif k == "q":
+                if pol is False and v["n"] == 1 and last_n > 1:
+                    runs.append({"pol": True, "items": []})
+                    pol, has_false = True, False
+                runs[-1]["items"].append((k, v))
+                last_n = v["n"]
+            elif k == "cont":
+                runs[-1]["items"].append((k, v))
+        groups = runs[1:]
+        if len(groups) != len(fresh):
+            warnings.append(f"page {page_no}: {len(fresh)} new block headers but {len(groups)} 'DOMANDE VERE' groups")
+
+        targets, block = [current], current
+        for gi in range(len(groups)):
+            if gi < len(fresh):
+                block = new_block(fresh[gi], page_no)
+            targets.append(block)                            # more groups than headers: stay on the previous block
+        page_blocks = targets[1:]
+        for h in fresh[len(groups):]:                        # header here, its questions start on the next page
+            block = new_block(h, page_no)
             page_blocks.append(block)
-            polarity = None
-            continue
-        if RE_FIG.match(line):
-            figs = [int(x) for x in re.findall(r"\d+", line)]
-            for b in page_blocks:
+        for b in page_blocks:
+            if b is not None:
                 b["figures"] += [f for f in figs if f not in b["figures"]]
-            close_q()
-            continue
-        pm = RE_POL.match(line)
-        if pm:
-            close_q()
-            polarity = pm.group(1) == "VERE"
-            continue
-        if line.isupper() and len(line) > 3 and not RE_Q.match(line):
-            close_block()
-            current_section = line
-            if current_section not in sections:
-                sections.append(current_section)
-            continue
-        qm = RE_Q.match(line)
-        if qm and block is not None and polarity is not None:
-            close_q()
-            q = {"n": int(qm.group("n")), "answer": polarity, "text": qm.group("text")}
-            continue
-        if q is not None:                                  # wrapped continuation line
-            q["text"] += " " + line
-    close_block()
-    return sections, blocks
+
+        for run, b in zip(runs, targets):
+            pol, last = run["pol"], None
+            for k, v in run["items"]:
+                if k == "pol":
+                    pol = False
+                elif k == "q":
+                    last = None
+                    if b is not None and pol is not None:
+                        last = {"n": v["n"], "answer": pol, "text": v["text"]}
+                        b["questions"].append(last)
+                elif last is not None:                       # continuation line
+                    if last["text"].endswith("-") and v[:1].isalpha():
+                        last["text"] = last["text"][:-1] + v    # hyphenated at the line break: per- / sone → persone
+                    else:
+                        last["text"] += " " + v
+            polarity = pol
+        current = block
+
+    for b in blocks:
+        for q in b["questions"]:
+            q["text"] = _clean(q["text"])
+    return sections, [b for b in blocks if b["questions"]], warnings
 
 
-def report(blocks):
+def report(blocks, warnings=()):
     per = {}
     for b in blocks:
         d = per.setdefault(b["section"], {"blocks": 0, "questions": 0})
         d["blocks"] += 1
         d["questions"] += len(b["questions"])
     total = sum(d["questions"] for d in per.values())
-    print(f"\nListato: {len(blocks)} blocks, {total} questions")
+    print(f"\nListato: {len(per)} sections, {len(blocks)} blocks, {total} questions")
     for s, d in per.items():
         print(f"  {d['blocks']:3d} blocks {d['questions']:4d} q  {s}")
-    small = [b["block"] for b in blocks if len(b["questions"]) < 3]
-    if small:
-        print(f"  ⚠ {len(small)} blocks with fewer than 3 questions (parse problem?): {small[:10]}")
+    gaps = []                                   # statements are numbered consecutively under each VERE / FALSE heading
+    for b in blocks:
+        for pol in (True, False):
+            ns = [q["n"] for q in b["questions"] if q["answer"] is pol]
+            if ns and ns != list(range(ns[0], ns[0] + len(ns))):    # a couple of blocks start at 2 or 5 in the PDF itself
+                gaps.append(b["block"])
+                break
+    if gaps:
+        print(f"  ⚠ {len(gaps)} blocks whose statement numbers skip or repeat (parse problem?): {gaps[:10]}")
+    for w in list(warnings)[:10]:
+        print(f"  ⚠ {w}")
     if total < 6000:
         print("  ⚠ Expected roughly 7,000 questions. Run with --dump and check data/listato_raw.txt.")
 
@@ -242,14 +322,19 @@ def main():
         print(f"Wrote {MANUAL_OUT}")
 
     if pdfs:
-        pdf = pdfs[0]
-        text = pdf_text(pdf)
+        named = [p for p in pdfs if "listato" in p.name.lower()]
+        pdf = (named or pdfs)[0]
+        others = [p.name for p in pdfs if p != pdf]
+        if others:
+            print(f"Using {pdf.name} as the listato; ignoring other PDFs: {others}")
+        pages = pdf_pages(pdf)
+        text = "\n".join(pages)
         if "--dump" in sys.argv:
             (DATA / "listato_raw.txt").write_text(text, encoding="utf-8")
             print(f"Wrote {DATA / 'listato_raw.txt'}")
         m = re.search(r"aggiornata al (\d{2}/\d{2}/\d{4})", text)
-        sections, blocks = parse_listato(text)
-        report(blocks)
+        sections, blocks, warnings = parse_listato(pages)
+        report(blocks, warnings)
         save_json(LISTATO_OUT, {"source": pdf.name, "updated": m.group(1) if m else None, "sections": sections, "blocks": blocks})
         print(f"Wrote {LISTATO_OUT} (listato dated {m.group(1) if m else 'unknown'})")
 

@@ -65,7 +65,7 @@ mkdir -p data/sources
 # copy the .epub files and ListatoAB.pdf into data/sources (Finder is fine)
 python pipeline/00_sources.py
 ```
-Expect two "sections … words" lines for the manuals and a table with ~30 sections and roughly 7,000 questions
+Expect two "sections … words" lines for the manuals and a table ending in `Listato: 31 sections, 716 blocks, 7144 questions` with no ⚠ lines
 for the listato. If the listato total is far off, run `python pipeline/00_sources.py --dump` and send me
 `data/listato_raw.txt` — the PDF text layout may differ from what I tested on.
 
@@ -80,7 +80,7 @@ Every script is resumable — if it stops, run the same command again.
 ```bash
 python pipeline/01_fetch_bank.py
 ```
-Expect `Listato bank: 30 topics, … stops, … questions` (or the 2023 numbers if you skipped the listato).
+Expect `Listato bank: 31 topics, 716 stops, 7144 questions` (or the 2023 numbers if you skipped the listato).
 
 Test the enrichment on one topic before paying for all of it:
 ```bash
@@ -103,7 +103,7 @@ Don't like it? `python pipeline/03_audio.py --voices` lists alternatives; set `T
 python pipeline/03_audio.py           # 10–20 min, free
 python pipeline/04_upload.py          # 5 min
 ```
-Check in Supabase → Table Editor: `questions` 7,139 rows, `terms` a few hundred rows, Storage bucket `media`
+Check in Supabase → Table Editor: `questions` 7,144 rows (7,139 if you skipped the listato), `terms` a few hundred rows, Storage bucket `media`
 with `images/` and `audio/`.
 
 ## 6. Try it locally
