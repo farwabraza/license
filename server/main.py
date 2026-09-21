@@ -3,6 +3,7 @@
 Run locally:  uvicorn server.main:app --reload --port 8000
 Env: SUPABASE_URL, SUPABASE_SERVICE_KEY, ANTHROPIC_API_KEY (optional, enables Ask tutor), CLAUDE_MODEL
 """
+import json
 import os
 import random
 import re
@@ -240,7 +241,7 @@ def subtopic(sid: str, user: str = Query(...)):
         return (2, -p["box"])
     qs.sort(key=key)
 
-    terms = sb.table("terms").select("*").contains("subtopic_ids", [sid]).execute().data
+    terms = sb.table("terms").select("*").contains("subtopic_ids", json.dumps([sid])).execute().data
     tpm = progress_map(user, [t["id"] for t in terms], "term_progress", "term_id")
     for t in terms:
         t["box"] = tpm.get(t["id"], {}).get("box", 0)
@@ -274,7 +275,7 @@ def review_set(sid: str, user: str = Query(...)):
     if not s:
         raise HTTPException(404, "sub-topic not found")
     topic_id = s[0]["topic_id"]
-    terms = sb.table("terms").select("*").contains("subtopic_ids", [sid]).execute().data
+    terms = sb.table("terms").select("*").contains("subtopic_ids", json.dumps([sid])).execute().data
     pool = [t for t in sb.table("terms").select("id,it,en").eq("topic_id", topic_id).limit(300).execute().data
             if t["id"] not in {x["id"] for x in terms}]
     if len(pool) < 6:
@@ -459,7 +460,7 @@ def words(user: str = Query(...), n: int = 20):
         candidates = []
         for c in chunks(done_stops, 40):
             for sid in c:
-                for t in sb.table("terms").select("id").contains("subtopic_ids", [sid]).execute().data:
+                for t in sb.table("terms").select("id").contains("subtopic_ids", json.dumps([sid])).execute().data:
                     if t["id"] not in known and t["id"] not in ids and t["id"] not in candidates:
                         candidates.append(t["id"])
             if len(candidates) >= n:
