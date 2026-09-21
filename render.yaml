@@ -1,0 +1,14 @@
+# Optional: deploy on Render instead of Replit (Blueprint). Set the env vars in the dashboard.
+services:
+  - type: web
+    name: strada
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
