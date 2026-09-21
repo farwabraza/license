@@ -7,6 +7,7 @@ Safe to re-run: storage uploads use upsert, rows are upserted by id.
 """
 import mimetypes
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from supabase import create_client
@@ -23,11 +24,19 @@ def ensure_bucket(sb):
         print(f"Created public bucket '{BUCKET}'")
 
 
-def upload_file(sb, local, remote):
+def upload_file(sb, local, remote, tries=5):
+    """Upload one file; Storage sometimes drops the connection under load, so retry with backoff.
+    Returns None on success, or the error text after the last try."""
     ctype = mimetypes.guess_type(str(local))[0] or "application/octet-stream"
-    with open(local, "rb") as f:
-        sb.storage.from_(BUCKET).upload(remote, f.read(), file_options={"content-type": ctype, "upsert": "true"})
-    return remote
+    data = local.read_bytes()
+    for attempt in range(1, tries + 1):
+        try:
+            sb.storage.from_(BUCKET).upload(remote, data, file_options={"content-type": ctype, "upsert": "true"})
+            return None
+        except Exception as e:  # noqa: BLE001 — httpx protocol errors and Storage 5xx alike
+            if attempt == tries:
+                return f"{remote}: {str(e)[:120]}"
+            time.sleep(2 ** attempt)
 
 
 def public_url(sb, remote):
@@ -50,13 +59,18 @@ def main():
         jobs = [(IMAGES / p.name, f"images/{p.name}") for p in sorted(IMAGES.glob("*.png"))]
         jobs += [(AUDIO / p.name, f"audio/{p.name}") for p in sorted(AUDIO.glob("*.mp3"))]
         print(f"Uploading {len(jobs)} media files…")
-        done = 0
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            for _ in pool.map(lambda j: upload_file(sb, *j), jobs):
+        done, failed = 0, []
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for err in pool.map(lambda j: upload_file(sb, *j), jobs):
                 done += 1
+                if err:
+                    failed.append(err)
                 if done % 100 == 0:
                     print(f"  {done}/{len(jobs)}")
-        print("Media uploaded.")
+        if failed:
+            print(f"⚠ {len(failed)} media files failed after retries (re-run to try again): {failed[:5]}")
+        else:
+            print("Media uploaded.")
 
     audio_ids = {p.stem for p in AUDIO.glob("*.mp3")}
 
