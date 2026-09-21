@@ -16,45 +16,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
-from common import BANK, DATA, IMAGES, SOURCE_REPO, TOPICS, load_json, save_json, slug_to_title
+from common import BANK, DATA, IMAGES, NECA_SECTIONS, SOURCE_REPO, TOPICS, canonical_section, load_json, save_json, slug_to_title
 
 SRC_JSON = f"{SOURCE_REPO}/quizPatenteB2023.json"
 LISTATO = DATA / "listato.json"
-
-# Neca section header (uppercase, as printed) → (slug, Italian title, English title)
-NECA_SECTIONS = {
-    "CLASSIFICAZIONE DEI VEICOLI": ("classificazione-veicoli", "Classificazione dei veicoli", "Vehicle types"),
-    "DEFINIZIONI STRADALI E DI TRAFFICO": ("definizioni-stradali", "Definizioni stradali e di traffico", "Road definitions"),
-    "SEGNALI DI PERICOLO": ("segnali-pericolo", "Segnali di pericolo", "Warning signs"),
-    "SEGNALI DI PRECEDENZA": ("segnali-precedenza", "Segnali di precedenza", "Right-of-way signs"),
-    "SEGNALI DI DIVIETO": ("segnali-divieto", "Segnali di divieto", "Prohibition signs"),
-    "SEGNALI DI OBBLIGO": ("segnali-obbligo", "Segnali di obbligo", "Mandatory signs"),
-    "SEGNALI DI INDICAZIONE": ("segnali-indicazione", "Segnali di indicazione", "Information signs"),
-    "SEGNALI TEMPORANEI E COMPLEMENTARI": ("segnali-temporanei-complementari", "Segnali temporanei e complementari", "Temporary & supplementary signs"),
-    "PANNELLI INTEGRATIVI": ("pannelli-integrativi", "Pannelli integrativi", "Supplementary panels"),
-    "SEGNALAZIONI SEMAFORICHE E VIGILE": ("semafori-vigile", "Segnalazioni semaforiche e vigile", "Traffic lights & police signals"),
-    "SEGNALI ORIZZONTALI": ("segnali-orizzontali", "Segnali orizzontali", "Road markings"),
-    "DISPOSITIVI DI SEGNALAZIONE VISIVA E ILLUMINAZIONE": ("luci-dispositivi", "Dispositivi di segnalazione visiva e illuminazione", "Lights & signalling devices"),
-    "SEGNALE DI VEICOLO FERMO E INGOMBRO CARREGGIATA": ("veicolo-fermo-ingombro", "Segnale di veicolo fermo e ingombro carreggiata", "Warning triangle & obstructing the road"),
-    "REGOLAZIONE DELLA VELOCITÀ": ("regolazione-velocita", "Regolazione della velocità", "Adjusting your speed"),
-    "LIMITI DI VELOCITÀ": ("limiti-velocita", "Limiti di velocità", "Speed limits"),
-    "ARRESTO E DISTANZA DI SICUREZZA": ("distanza-sicurezza", "Arresto e distanza di sicurezza", "Stopping & safe distance"),
-    "POSIZIONE SULLA CARREGGIATA, CAMBIO DI DIREZIONE E CORSIA": ("posizione-cambio-corsia", "Posizione sulla carreggiata, cambio di direzione e corsia", "Road position, turning & lane changes"),
-    "NORME SULLE PRECEDENZE E CORTEI": ("precedenze", "Norme sulle precedenze e cortei", "Right of way & processions"),
-    "SORPASSO": ("sorpasso", "Sorpasso", "Overtaking"),
-    "ARRESTO, FERMATA E SOSTA": ("fermata-sosta", "Arresto, fermata e sosta", "Stopping, halting & parking"),
-    "CIRCOLAZIONE SULLE AUTOSTRADE": ("autostrade", "Circolazione sulle autostrade", "Motorways"),
-    "TRASPORTO DI PERSONE, SISTEMAZIONE CARICO, PANNELLI E TRAINO": ("trasporto-carico-traino", "Trasporto di persone, carico, pannelli e traino", "Passengers, loads, panels & towing"),
-    "DOCUMENTI OBBLIGATORI, AGENTI E TARGHE": ("documenti", "Documenti obbligatori, agenti e targhe", "Documents, officers & plates"),
-    "CAUSE DI INCIDENTI": ("cause-incidenti", "Cause di incidenti", "Causes of accidents"),
-    "RESPONSABILITÀ CIVILE, PENALE E ASSICURAZIONE": ("responsabilita-assicurazione", "Responsabilità civile, penale e assicurazione", "Liability & insurance"),
-    "PRIMO SOCCORSO ALLE PERSONE INFORTUNATE": ("primo-soccorso", "Primo soccorso alle persone infortunate", "First aid"),
-    "CINTURE DI SICUREZZA, AIRBAG E CASCO PROTETTIVO": ("cinture-airbag-casco", "Cinture di sicurezza, airbag e casco", "Seat belts, airbags & helmets"),
-    "INQUINAMENTO AMBIENTALE E ACUSTICO": ("inquinamento", "Inquinamento ambientale e acustico", "Pollution & noise"),
-    "ELEMENTI DEL VEICOLO": ("elementi-veicolo", "Elementi del veicolo", "Vehicle parts"),
-    "PNEUMATICI, ADERENZA E STABILITÀ": ("pneumatici-stabilita", "Pneumatici, aderenza e stabilità", "Tyres, grip & stability"),
-    "SPIE E SIMBOLI": ("spie-simboli", "Spie e simboli", "Warning lights & symbols"),
-}
 
 
 def norm(t: str) -> str:
@@ -68,10 +33,9 @@ def slugify(t: str) -> str:
 
 
 def section_meta(header: str):
-    key = re.sub(r"\s+", " ", header.strip().upper())
-    for k, v in NECA_SECTIONS.items():
-        if key.startswith(k[:25]):
-            return v
+    key = canonical_section(header)
+    if key:
+        return NECA_SECTIONS[key]
     return (slugify(header), header.title(), header.title())
 
 
@@ -115,16 +79,15 @@ def bank_from_listato(listato, github_bank, image_names=frozenset()):
         by_text.setdefault(norm(q["q_it"]), []).append((q["answer"], q["image"]))
 
     topics, subtopics, questions = [], [], []
-    topic_by_section, sub_ord = {}, Counter()
+    topic_by_slug, sub_ord = {}, Counter()
     stats = Counter()
     for b in listato["blocks"]:
-        sec = b["section"] or "ALTRO"
-        if sec not in topic_by_section:
-            slug, it, en = section_meta(sec)
-            tid = f"t{len(topic_by_section) + 1:02d}"
-            topic_by_section[sec] = tid
+        slug, it, en = section_meta(b["section"] or "ALTRO")
+        if slug not in topic_by_slug:
+            tid = f"t{len(topic_by_slug) + 1:02d}"
+            topic_by_slug[slug] = tid
             topics.append({"id": tid, "ord": len(topics) + 1, "slug": slug, "title_it": it, "title_en": en})
-        tid = topic_by_section[sec]
+        tid = topic_by_slug[slug]
         sub_ord[tid] += 1
         sid = f"{tid}-s{sub_ord[tid]:03d}"
 

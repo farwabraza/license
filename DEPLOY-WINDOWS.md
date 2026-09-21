@@ -67,7 +67,7 @@ Create the folder `data\sources` inside the `license` folder (Explorer is fine) 
 ```powershell
 python pipeline\00_sources.py
 ```
-Expect two "sections … words" lines for the manuals and a table with ~30 sections and roughly 7,000 questions
+Expect two "sections … words" lines for the manuals and a table ending in `Listato: 31 sections, 716 blocks, 7144 questions` with no ⚠ lines
 for the listato. If the total is far off, run `python pipeline\00_sources.py --dump` and send me
 `data\listato_raw.txt`.
 
@@ -76,7 +76,7 @@ for the listato. If the total is far off, run `python pipeline\00_sources.py --d
 ```powershell
 python pipeline\01_fetch_bank.py
 ```
-Expect `Listato bank: 30 topics, … stops, … questions`.
+Expect `Listato bank: 31 topics, 716 stops, 7144 questions`.
 
 Test one topic before paying for all of it:
 ```powershell
