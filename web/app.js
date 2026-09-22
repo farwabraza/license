@@ -601,5 +601,14 @@
   }
   window.addEventListener('hashchange', route);
   route();
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    // A screen is painted from the cache first; when the server's answer turns out to differ, redraw —
+    // but only where redrawing costs nothing. A quiz, exam or review in progress keeps its state.
+    const REDRAWABLE = ['', 'topic', 'stats'];
+    navigator.serviceWorker.addEventListener('message', e => {
+      if (e.data?.type !== 'api-updated') return;
+      if (REDRAWABLE.includes(location.hash.replace(/^#\/?/, '').split('/')[0])) route();
+    });
+  }
 })();
