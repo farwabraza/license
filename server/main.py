@@ -3,16 +3,17 @@
 Run locally:  uvicorn server.main:app --reload --port 8000
 Env: SUPABASE_URL, SUPABASE_SERVICE_KEY, ANTHROPIC_API_KEY (optional, enables Ask tutor), CLAUDE_MODEL
 """
-import json
 import os
 import random
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -31,6 +32,8 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI(title="STRADA")
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+CONTENT_TTL = int(os.getenv("CONTENT_TTL", "600"))             # seconds the course content stays cached in memory
 
 LEITNER_DAYS = [0, 1, 3, 7, 14, 30]
 EXAM_SIZE = int(os.getenv("EXAM_SIZE", "30"))
@@ -73,15 +76,47 @@ def fetch_all(table, select="*", page=1000, **eq):
         start += page
 
 
-def rows_by_ids(table, ids, key="id", select="*"):
-    rows = []
-    for c in chunks(list(ids)):
-        rows.extend(sb.table(table).select(select).in_(key, c).execute().data)
-    return rows
+# ---------- course content cache ----------
+# The course (topics, stops, questions, words) only changes when the pipeline uploads, but every screen
+# used to re-read it from Supabase, so opening one stop cost eight sequential round-trips. Keep it in
+# memory instead and re-read it at most every CONTENT_TTL seconds; only user progress still hits the API.
+# Callers get copies, because endpoints add per-user fields (box, wrong, prev/next) to the rows.
+
+_content = {}
+
+
+def content(table):
+    """Cached rows of a content table, with lookup indexes: {rows, by_id, by_sub, by_topic}."""
+    hit = _content.get(table)
+    if hit and hit["expires"] > time.monotonic():
+        return hit
+    rows = fetch_all(table, "*")
+    hit = {"expires": time.monotonic() + CONTENT_TTL, "rows": rows, "by_id": {r["id"]: r for r in rows},
+           "by_sub": {}, "by_topic": {}}
+    for r in rows:
+        if r.get("subtopic_id"):
+            hit["by_sub"].setdefault(r["subtopic_id"], []).append(r)
+        if r.get("topic_id"):
+            hit["by_topic"].setdefault(r["topic_id"], []).append(r)
+    for key in ("by_sub", "by_topic"):
+        for group in hit[key].values():
+            group.sort(key=lambda r: r.get("ord") or 0)
+    if table == "terms":                                        # terms link to stops through a jsonb array
+        hit["by_sub"] = {}
+        for r in rows:
+            for sid in r.get("subtopic_ids") or []:
+                hit["by_sub"].setdefault(sid, []).append(r)
+    _content[table] = hit
+    return hit
+
+
+def copies(rows):
+    return [dict(r) for r in rows]
 
 
 def questions_by_ids(ids):
-    return rows_by_ids("questions", ids)
+    by_id = content("questions")["by_id"]
+    return [dict(by_id[i]) for i in ids if i in by_id]
 
 
 def progress_map(user, ids, table="progress", key="question_id"):
@@ -92,14 +127,8 @@ def progress_map(user, ids, table="progress", key="question_id"):
     return m
 
 
-_QUESTION_INDEX = []
-
-
 def question_index():
-    global _QUESTION_INDEX
-    if not _QUESTION_INDEX:
-        _QUESTION_INDEX = [(r["id"], r["topic_id"]) for r in fetch_all("questions", "id,topic_id")]
-    return _QUESTION_INDEX
+    return [(r["id"], r["topic_id"]) for r in content("questions")["rows"]]
 
 
 def leitner(table, key, user, item_id, correct):
@@ -188,8 +217,9 @@ def health():
 
 @app.get("/api/topics")
 def topics(user: str = Query(...)):
-    ts = sb.table("topics").select("*").order("ord").execute().data
-    subs = fetch_all("subtopics", "id,topic_id,question_count")
+    ts = copies(content("topics")["rows"])
+    ts.sort(key=lambda t: t["ord"])
+    subs = content("subtopics")["rows"]
     prog = stop_progress(user)
     mastered = mastered_topics(user)
     for t in ts:
@@ -204,11 +234,11 @@ def topics(user: str = Query(...)):
 
 @app.get("/api/topics/{tid}")
 def topic(tid: str, user: str = Query(...)):
-    t = sb.table("topics").select("*").eq("id", tid).execute().data
+    t = content("topics")["by_id"].get(tid)
     if not t:
         raise HTTPException(404, "topic not found")
-    subs = sb.table("subtopics").select("id,topic_id,ord,slug,title_it,title_en,image_url,question_count,audio_url") \
-        .eq("topic_id", tid).order("ord").execute().data
+    fields = ("id", "topic_id", "ord", "slug", "title_it", "title_en", "image_url", "question_count", "audio_url")
+    subs = [{k: s[k] for k in fields} for s in content("subtopics")["by_topic"].get(tid, [])]
     prog = stop_progress(user)
     for s in subs:
         p = prog.get(s["id"], {})
@@ -216,16 +246,16 @@ def topic(tid: str, user: str = Query(...)):
             s[k] = bool(p.get(k))
         s["best_accuracy"] = p.get("best_accuracy")
         s["attempts"] = p.get("attempts", 0)
-    return {"topic": t[0], "subtopics": subs, "mastered": tid in mastered_topics(user)}
+    return {"topic": t, "subtopics": subs, "mastered": tid in mastered_topics(user)}
 
 
 @app.get("/api/subtopics/{sid}")
 def subtopic(sid: str, user: str = Query(...)):
-    s = sb.table("subtopics").select("*").eq("id", sid).execute().data
-    if not s:
+    row = content("subtopics")["by_id"].get(sid)
+    if not row:
         raise HTTPException(404, "sub-topic not found")
-    s = s[0]
-    qs = sb.table("questions").select("*").eq("subtopic_id", sid).order("ord").execute().data
+    s = dict(row)
+    qs = copies(content("questions")["by_sub"].get(sid, []))
     pm = progress_map(user, [q["id"] for q in qs])
     for q in qs:
         p = pm.get(q["id"])
@@ -241,21 +271,22 @@ def subtopic(sid: str, user: str = Query(...)):
         return (2, -p["box"])
     qs.sort(key=key)
 
-    terms = sb.table("terms").select("*").contains("subtopic_ids", json.dumps([sid])).execute().data
+    terms = copies(content("terms")["by_sub"].get(sid, []))
     tpm = progress_map(user, [t["id"] for t in terms], "term_progress", "term_id")
     for t in terms:
         t["box"] = tpm.get(t["id"], {}).get("box", 0)
 
-    siblings = sb.table("subtopics").select("id,ord,title_en").eq("topic_id", s["topic_id"]).order("ord").execute().data
+    siblings = content("subtopics")["by_topic"].get(s["topic_id"], [])
     idx = next(i for i, x in enumerate(siblings) if x["id"] == sid)
-    s["prev"] = siblings[idx - 1] if idx > 0 else None
-    s["next"] = siblings[idx + 1] if idx + 1 < len(siblings) else None
-    prog = sb.table("subtopic_progress").select("*").eq("user_id", user).eq("subtopic_id", sid).execute().data
-    prev_prog = None
-    if s["prev"]:
-        pp = sb.table("subtopic_progress").select("quiz_passed").eq("user_id", user).eq("subtopic_id", s["prev"]["id"]).execute().data
-        prev_prog = bool(pp and pp[0]["quiz_passed"])
-    t = sb.table("topics").select("id,title_en,title_it").eq("id", s["topic_id"]).execute().data[0]
+    nav = [{k: x[k] for k in ("id", "ord", "title_en")} for x in siblings]
+    s["prev"] = nav[idx - 1] if idx > 0 else None
+    s["next"] = nav[idx + 1] if idx + 1 < len(nav) else None
+    wanted = [sid] + ([s["prev"]["id"]] if s["prev"] else [])     # this stop and the one that unlocks it, in one call
+    by_stop = {r["subtopic_id"]: r for r in
+               sb.table("subtopic_progress").select("*").eq("user_id", user).in_("subtopic_id", wanted).execute().data}
+    prog = [by_stop[sid]] if sid in by_stop else []
+    prev_prog = bool(by_stop.get(s["prev"]["id"], {}).get("quiz_passed")) if s["prev"] else None
+    t = content("topics")["by_id"][s["topic_id"]]
     return {"subtopic": s, "topic": t, "questions": qs, "terms": terms,
             "progress": prog[0] if prog else None, "prev_passed": prev_prog}
 
@@ -271,16 +302,16 @@ def blank_trap(statement, word):
 
 @app.get("/api/review_set/{sid}")
 def review_set(sid: str, user: str = Query(...)):
-    s = sb.table("subtopics").select("id,topic_id").eq("id", sid).execute().data
+    s = content("subtopics")["by_id"].get(sid)
     if not s:
         raise HTTPException(404, "sub-topic not found")
-    topic_id = s[0]["topic_id"]
-    terms = sb.table("terms").select("*").contains("subtopic_ids", json.dumps([sid])).execute().data
-    pool = [t for t in sb.table("terms").select("id,it,en").eq("topic_id", topic_id).limit(300).execute().data
-            if t["id"] not in {x["id"] for x in terms}]
+    topic_id = s["topic_id"]
+    terms = copies(content("terms")["by_sub"].get(sid, []))
+    mine = {x["id"] for x in terms}
+    pool = [t for t in content("terms")["by_topic"].get(topic_id, [])[:300] if t["id"] not in mine]
     if len(pool) < 6:
-        pool += [t for t in sb.table("terms").select("id,it,en").limit(200).execute().data
-                 if t["id"] not in {x["id"] for x in terms} and t not in pool]
+        in_pool = {t["id"] for t in pool}
+        pool += [t for t in content("terms")["rows"][:200] if t["id"] not in mine and t["id"] not in in_pool]
     random.shuffle(pool)
 
     exercises = []
@@ -298,8 +329,7 @@ def review_set(sid: str, user: str = Query(...)):
             "options": options, "answer_index": options.index(t[field]),
         })
 
-    qs = [q for q in sb.table("questions").select("id,q_it,answer,q_en,why_en,trap_words,trap_type,image_url")
-          .eq("subtopic_id", sid).execute().data if q["trap_words"]]
+    qs = copies(q for q in content("questions")["by_sub"].get(sid, []) if q["trap_words"])
     random.shuffle(qs)
     for q in qs[:6]:
         word = q["trap_words"][0]
@@ -413,7 +443,8 @@ def repair(user: str = Query(...)):
     prog = fetch_all("progress", "question_id,seen,wrong", user_id=user)
     if len(prog) < 10:
         raise HTTPException(400, "Do a few stops first — a repair test needs some mistake history to work from.")
-    qmeta = {q["id"]: q["topic_id"] for q in rows_by_ids("questions", [p["question_id"] for p in prog], select="id,topic_id")}
+    by_id = content("questions")["by_id"]
+    qmeta = {p["question_id"]: by_id[p["question_id"]]["topic_id"] for p in prog if p["question_id"] in by_id}
     per = {}
     for p in prog:
         t = qmeta.get(p["question_id"])
@@ -434,7 +465,7 @@ def repair(user: str = Query(...)):
         ids += unseen[:REPAIR_SIZE - len(ids)]
     qs = questions_by_ids(ids)
     random.shuffle(qs)
-    titles = [t["title_en"] for t in rows_by_ids("topics", weak, select="id,title_en")]
+    titles = [content("topics")["by_id"][t]["title_en"] for t in weak if t in content("topics")["by_id"]]
     return {"questions": qs, "minutes": None, "max_errors": TOPIC_TEST_MAX_ERRORS, "topics": titles, "topic_ids": weak}
 
 
@@ -460,7 +491,7 @@ def words(user: str = Query(...), n: int = 20):
         candidates = []
         for c in chunks(done_stops, 40):
             for sid in c:
-                for t in sb.table("terms").select("id").contains("subtopic_ids", json.dumps([sid])).execute().data:
+                for t in content("terms")["by_sub"].get(sid, []):
                     if t["id"] not in known and t["id"] not in ids and t["id"] not in candidates:
                         candidates.append(t["id"])
             if len(candidates) >= n:
@@ -469,7 +500,8 @@ def words(user: str = Query(...), n: int = 20):
         add = candidates[:n - len(ids)]
         new_count = len(add)
         ids += add
-    terms = rows_by_ids("terms", ids)
+    by_term = content("terms")["by_id"]
+    terms = [dict(by_term[i]) for i in ids if i in by_term]
     for t in terms:
         t["box"] = boxes.get(t["id"], 0)
     random.shuffle(terms)
@@ -490,8 +522,8 @@ def stats(user: str = Query(...)):
                        "topics_mastered": len(mastered_topics(user))}}
     if not prog:
         return base
-    qmeta = {q["id"]: q for q in rows_by_ids("questions", [p["question_id"] for p in prog], select="id,topic_id,trap_words")}
-    ts = {t["id"]: t for t in sb.table("topics").select("id,ord,title_en").execute().data}
+    qmeta = content("questions")["by_id"]
+    ts = content("topics")["by_id"]
     words_, per_topic = {}, {}
     for p in prog:
         q = qmeta.get(p["question_id"])
