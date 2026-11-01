@@ -1,6 +1,6 @@
 /* STRADA service worker: app shell offline, media cached after first play,
    API stale-while-revalidate so a screen you have seen before paints at once. */
-const VERSION = 'strada-v3';
+const VERSION = 'strada-v4';
 const SHELL = ['/', '/index.html', '/app.js', '/styles.css', '/manifest.json', '/icon.svg'];
 
 self.addEventListener('install', e => {
@@ -37,9 +37,13 @@ self.addEventListener('fetch', e => {
     }));
     return;
   }
-  // media from Supabase storage and Google Fonts: cache-first
+  // An <audio> element asks for byte ranges. The Cache API ignores Range on a match and cannot store a
+  // 206 at all, so answering one from cache hands Safari a whole 200 body for a range it asked for and
+  // playback silently never starts. Leave range requests to the browser.
+  if (req.headers.has('range')) return;
+  // other media from Supabase storage and Google Fonts: cache-first
   e.respondWith(caches.match(req).then(hit => hit || fetch(req).then(r => {
-    if (r.ok || r.type === 'opaque') { const copy = r.clone(); caches.open(VERSION).then(c => c.put(req, copy)); }
+    if (r.status === 200 || r.type === 'opaque') { const copy = r.clone(); caches.open(VERSION).then(c => c.put(req, copy)); }
     return r;
   })));
 });
