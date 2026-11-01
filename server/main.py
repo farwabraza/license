@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.gzip import GZipMiddleware
@@ -30,7 +31,37 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise SystemExit("Set SUPABASE_URL and SUPABASE_SERVICE_KEY (in .env locally, or Secrets/Environment on the host).")
 
-sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Supabase drops a connection now and then (it did it to the media upload too, see pipeline/04_upload.py).
+# A dropped read used to reach the phone as "Couldn't load", so every query goes through this proxy: calls
+# are forwarded to the real query builder untouched, and only .execute() is retried, only for the errors
+# that mean "the connection went away". A real error — a bad column, a 4xx — is raised on the first try.
+DROPPED = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ConnectTimeout,
+           httpx.ReadError, httpx.ReadTimeout, httpx.WriteError, httpx.PoolTimeout)
+
+
+class Retrying:
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args, **kwargs):
+            if name != "execute":
+                return Retrying(attr(*args, **kwargs))
+            for attempt in range(1, 4):
+                try:
+                    return attr(*args, **kwargs)
+                except DROPPED:
+                    if attempt == 3:
+                        raise
+                    time.sleep(0.25 * attempt)
+        return call
+
+
+sb = Retrying(create_client(SUPABASE_URL, SUPABASE_KEY))
 app = FastAPI(title="STRADA")
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 CONTENT_TTL = int(os.getenv("CONTENT_TTL", "600"))             # seconds the course content stays cached in memory
@@ -61,6 +92,7 @@ def iso(dt):
 def chunks(xs, n=200):
     for i in range(0, len(xs), n):
         yield xs[i:i + n]
+
 
 
 def fetch_all(table, select="*", page=1000, **eq):
