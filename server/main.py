@@ -127,10 +127,10 @@ def questions_by_ids(ids):
     return [dict(by_id[i]) for i in ids if i in by_id]
 
 
-def progress_map(user, ids, table="progress", key="question_id"):
+def progress_map(user, ids, table="progress", key="question_id", select="*"):
     m = {}
     for c in chunks(list(ids)):
-        for r in sb.table(table).select("*").eq("user_id", user).in_(key, c).execute().data:
+        for r in sb.table(table).select(select).eq("user_id", user).in_(key, c).execute().data:
             m[r[key]] = r
     return m
 
@@ -278,27 +278,32 @@ def stop_terms(s, term_rows):
 
 
 @app.get("/api/topics/{tid}/marathon")
-def topic_marathon(tid: str):
-    """Everything the marathon and read screens need for one topic, in stop order: each stop's title, figure, audio,
-    narration and word list, plus every question. Built from the content cache into fresh dicts (the cached rows are
+def topic_marathon(tid: str, part: str = Query("all", pattern="^(all|lesson|questions)$")):
+    """What the two topic screens need, in stop order. part=lesson (the topic lesson screen): each stop's title, figure,
+    audio, narration and word list, no questions. part=questions (the topic questions screen): the stop titles and
+    every question, no narration. Default all. Built from the content cache into fresh dicts (the cached rows are
     never touched), lean: empty fields are left out."""
     t = content("topics")["by_id"].get(tid)
     if not t:
         raise HTTPException(404, "topic not found")
     by_sub = content("questions")["by_sub"]
     terms_by_sub = content("terms")["by_sub"]
+    want_lesson, want_qs = part in ("all", "lesson"), part in ("all", "questions")
     stops, qs = [], []
     for i, s in enumerate(content("subtopics")["by_topic"].get(tid, [])):
         stop = {"id": s["id"], "ord": s["ord"], "title_en": s["title_en"]}
-        for k in MARATHON_STOP_OPTIONAL:
-            if s.get(k):
-                stop[k] = s[k]
-        words = stop_terms(s, terms_by_sub.get(s["id"], []))
-        if words:
-            stop["terms"] = words
+        if want_lesson:
+            for k in MARATHON_STOP_OPTIONAL:
+                if s.get(k):
+                    stop[k] = s[k]
+            words = stop_terms(s, terms_by_sub.get(s["id"], []))
+            if words:
+                stop["terms"] = words
         stops.append(stop)
+        if not want_qs:
+            continue
         # the listato prints a block as its true statements then its false ones; keep stop order, because the
-        # narration follows it, but shuffle inside a stop so the answers cannot be read off the position
+        # lesson follows it, but shuffle inside a stop so the answers cannot be read off the position
         stop_qs = day_shuffle(list(by_sub.get(s["id"], [])), "marathon", s["id"])
         for q in stop_qs:
             row = {"id": q["id"], "stop": i, "q_it": q["q_it"], "answer": q["answer"]}
@@ -308,7 +313,47 @@ def topic_marathon(tid: str):
             if q.get("trap_words") and q.get("trap_type") not in (None, "none"):
                 row["trap_type"] = q["trap_type"]
             qs.append(row)
-    return {"topic": {"id": t["id"], "title_en": t["title_en"], "title_it": t["title_it"]}, "stops": stops, "questions": qs}
+    out = {"topic": {"id": t["id"], "title_en": t["title_en"], "title_it": t["title_it"]}, "stops": stops,
+           "question_count": sum(len(by_sub.get(s["id"], [])) for s in content("subtopics")["by_topic"].get(tid, []))}
+    if want_qs:
+        out["questions"] = qs
+    return out
+
+
+WEAK_MIN_ATTEMPTS = int(os.getenv("WEAK_MIN_ATTEMPTS", "5"))    # answers a stop needs before its accuracy counts
+WEAK_BELOW_PCT = int(os.getenv("WEAK_BELOW_PCT", "80"))        # a stop under this accuracy is a weak candidate
+WEAK_MAX = int(os.getenv("WEAK_MAX", "5"))                     # at most this many stops are marked weak per topic
+
+
+@app.get("/api/topics/{tid}/stop_stats")
+def stop_stats(tid: str, user: str = Query(...)):
+    """How the user is doing on each stop of a topic, from the progress table (seen / wrong per question).
+    answered = distinct questions answered at least once; attempts = answers given (repeats count); accuracy =
+    share of attempts that were right. Weak rule: a stop needs at least WEAK_MIN_ATTEMPTS attempts to have a
+    verdict at all (less history is just unknown), and is weak when its accuracy is under WEAK_BELOW_PCT; of those,
+    only the WEAK_MAX worst (lowest accuracy, then most wrong answers) are marked. The stops and their questions
+    come from the content cache; only the user's own progress rows are read from Supabase."""
+    if tid not in content("topics")["by_id"]:
+        raise HTTPException(404, "topic not found")
+    by_sub = content("questions")["by_sub"]
+    stops = content("subtopics")["by_topic"].get(tid, [])
+    ids = [q["id"] for s in stops for q in by_sub.get(s["id"], [])]
+    pm = progress_map(user, ids, select="question_id,seen,wrong")
+    out = []
+    for s in stops:
+        qs = by_sub.get(s["id"], [])
+        rows = [pm[q["id"]] for q in qs if q["id"] in pm]
+        attempts = sum(r["seen"] for r in rows)
+        wrong = sum(r["wrong"] for r in rows)
+        known = attempts >= WEAK_MIN_ATTEMPTS
+        out.append({"id": s["id"], "ord": s["ord"], "questions": len(qs), "answered": sum(1 for r in rows if r["seen"] > 0),
+                    "attempts": attempts, "wrong": wrong,
+                    "accuracy": round(100 * (attempts - wrong) / attempts) if known else None, "weak": False})
+    candidates = [o for o in out if o["accuracy"] is not None and o["accuracy"] < WEAK_BELOW_PCT]
+    candidates.sort(key=lambda o: (o["accuracy"], -o["wrong"], o["ord"]))
+    for o in candidates[:WEAK_MAX]:
+        o["weak"] = True
+    return {"topic_id": tid, "stops": out, "min_attempts": WEAK_MIN_ATTEMPTS, "weak_below_pct": WEAK_BELOW_PCT}
 
 
 @app.get("/api/subtopics/{sid}")

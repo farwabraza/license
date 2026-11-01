@@ -8,8 +8,7 @@
     unlockAll: localStorage.getItem('strada_unlock') === '1',
     subCache: {},
     health: null,
-    playlist: null,
-    marathon: null,
+    topicAudio: null,                                           // the one <audio> of the topic lesson screen, while it is open
   };
 
   // ---------- utils ----------
@@ -57,6 +56,14 @@
   }
   const narrationHtml = n => h(n).replace(/\[\[(.+?)\]\]/g, (_, t) => `<button class="term" data-say="${h(t)}">${h(t)}</button>`);
   const termsHtml = list => (list || []).map(t => `<button data-say="${h(t.it)}"><span class="it">${h(t.it)}</span> — ${h(t.en)}${t.note ? `<div class="note">${h(t.note)}</div>` : ''}</button>`).join('');
+
+  // how the user is doing on each stop of a topic ({answered, attempts, wrong, accuracy, weak}); missing data just means no marks
+  async function stopStats(tid) {
+    try { return new Map((await api(`/api/topics/${tid}/stop_stats`)).stops.map(x => [x.id, x])); } catch (_) { return new Map(); }
+  }
+  const weakBadge = (st, long) => !st || !st.weak ? ''
+    : long ? `<div class="weakline"><span class="badge red">Weak stop</span> <span class="small muted">${st.accuracy}% right · ${st.wrong} wrong in ${st.attempts} answers</span></div>`
+      : `<span class="badge red">weak · ${st.accuracy}%</span>`;
 
   function setTab(name) { tabs.querySelectorAll('a').forEach(a => a.classList.toggle('on', a.dataset.tab === name)); }
   // the bar is fixed over the page; publish its height so nothing ends up hidden behind it
@@ -135,59 +142,36 @@
   async function topic(tid) {
     setTab('home');
     app.innerHTML = bar('#/', 'Topic') + `<div class="empty">Loading…</div>`;
-    let d;
-    try { d = await api(`/api/topics/${tid}`); } catch (e) { app.innerHTML = errorCard(e, `#/topic/${tid}`); return; }
+    let d, stats;
+    try { [d, stats] = await Promise.all([api(`/api/topics/${tid}`), stopStats(tid)]); } catch (e) { app.innerHTML = errorCard(e, `#/topic/${tid}`); return; }
     const subs = d.subtopics;
     const nextId = (subs.find(s => !s.quiz_passed) || {}).id;
     const withAudio = subs.filter(s => s.audio_url).length;
-    const marathonQs = subs.reduce((a, s) => a + s.question_count, 0);
+    const topicQs = subs.reduce((a, s) => a + s.question_count, 0);
+    const lockedAt = i => isLocked(subs[i].ord, i > 0 && subs[i - 1].quiz_passed);
+    const weak = subs.map((s, i) => [s, i]).filter(([s]) => stats.get(s.id)?.weak);
     app.innerHTML = bar('#/', d.topic.title_it) + `
       <h1>${h(d.topic.title_en)}${d.mastered ? '<span class="badge green">mastered</span>' : ''}</h1>
       <p class="muted">${subs.filter(s => s.quiz_passed).length} of ${subs.length} stops passed. Stops unlock in order as you pass each quiz.</p>
-      <div class="row">
+      <div class="stack">
+        <button class="btn primary" data-go="#/read/${tid}">Topic lesson · ${subs.length} stops${withAudio ? ' with audio' : ''}</button>
+        ${topicQs ? `<button class="btn quiet" data-go="#/marathon/${tid}">Skip to the topic questions · ${topicQs}</button>` : ''}
         <button class="btn" data-go="#/topic-test/${tid}">Topic test</button>
-        <button class="btn" data-go="#/read/${tid}">Read the topic</button>
-      </div>
-      ${withAudio ? `${gap(10)}<button class="btn" id="playall">Listen to all ${withAudio} stops</button>` : ''}
-      ${marathonQs ? `${gap(10)}<button class="btn primary" data-go="#/marathon/${tid}">Marathon · all ${marathonQs} questions + narration</button>` : ''}${gap(16)}
+      </div>${gap(16)}
+      ${weak.length ? `<div class="card weakcard"><strong>Needs extra attention</strong><div class="small muted">The stops you get wrong most, lowest accuracy first:</div>
+        <div class="chips">${weak.map(([s, i]) => `<button class="chip" ${lockedAt(i) ? `data-locked="Pass stop ${s.ord - 1} first"` : `data-go="#/lesson/${s.id}"`}>Stop ${s.ord} · ${stats.get(s.id).accuracy}%</button>`).join('')}</div></div>${gap(16)}` : ''}
       <div class="road">${subs.map((s, i) => {
-        const locked = isLocked(s.ord, i > 0 && subs[i - 1].quiz_passed);
+        const locked = lockedAt(i);
+        const st = stats.get(s.id);
         const cls = s.quiz_passed ? 'done' : s.lesson_done || s.review_done ? 'started' : '';
-        const meta = [`${s.question_count} questions`, s.best_accuracy != null ? `best ${s.best_accuracy}%` : null, s.attempts > 1 ? `${s.attempts} tries` : null].filter(Boolean).join(' · ');
+        const meta = [`${s.question_count} questions`, s.best_accuracy != null ? `best ${s.best_accuracy}%` : null, s.attempts > 1 ? `${s.attempts} tries` : null,
+          st && st.accuracy != null ? `${st.accuracy}% right overall` : null].filter(Boolean).join(' · ');
         return `<button class="node ${cls} ${locked ? 'locked' : ''} ${s.id === nextId && !locked ? 'next' : ''}" ${locked ? `data-locked="Pass stop ${s.ord - 1} first"` : `data-go="#/lesson/${s.id}"`}>
           <span class="dot">${s.quiz_passed ? '✓' : locked ? '🔒' : s.ord}</span>
-          <div class="title">${h(s.title_en)}</div>
+          <div class="title">${h(s.title_en)}${weakBadge(st)}</div>
           <div class="sub">${h(s.title_it)} · ${meta}</div>
         </button>`; }).join('')}
       </div>`;
-    const pa = document.getElementById('playall');
-    if (pa) pa.onclick = () => startPlaylist(subs.filter(s => s.audio_url), d.topic.title_en);
-  }
-
-  // ---------- playlist mini-player ----------
-  function startPlaylist(subs, title) {
-    stopPlaylist();
-    const audio = new Audio();
-    let i = 0;
-    const box = el(`<div id="player"><button id="pp">❚❚</button><div class="t"></div><button id="nx">⏭</button><button id="cl">✕</button></div>`);
-    document.body.appendChild(box);
-    const label = () => box.querySelector('.t').textContent = `${title} · ${i + 1}/${subs.length} · ${subs[i].title_en}`;
-    const play = () => { if (i >= subs.length) return stopPlaylist(); audio.src = subs[i].audio_url; label(); audio.play(); };
-    audio.onended = () => { post('/api/subtopic_progress', { subtopic_id: subs[i].id, lesson_done: true }); i++; play(); };
-    audio.onplay = () => box.querySelector('#pp').textContent = '❚❚';
-    audio.onpause = () => box.querySelector('#pp').textContent = '▶';
-    box.querySelector('#pp').onclick = () => audio.paused ? audio.play() : audio.pause();
-    box.querySelector('#nx').onclick = () => { i++; play(); };
-    box.querySelector('#cl').onclick = stopPlaylist;
-    state.playlist = { audio, box };
-    document.body.classList.add('has-player');
-    play();
-  }
-  function stopPlaylist() {
-    if (!state.playlist) return;
-    state.playlist.audio.pause(); state.playlist.audio.src = '';
-    state.playlist.box.remove(); state.playlist = null;
-    document.body.classList.remove('has-player');
   }
 
   async function loadSub(sid, fresh) {
@@ -226,7 +210,7 @@
     if (s.audio_url) {
       const audio = new Audio(s.audio_url);
       const play = document.getElementById('play'), trk = document.getElementById('trk'), tm = document.getElementById('tm');
-      play.onclick = () => { if (audio.paused) { window.speechSynthesis?.cancel(); stopPlaylist(); audio.play(); } else audio.pause(); };
+      play.onclick = () => { if (audio.paused) { window.speechSynthesis?.cancel(); audio.play(); } else audio.pause(); };
       audio.onplay = () => play.textContent = '❚❚';
       audio.onpause = () => play.textContent = '▶';
       audio.ontimeupdate = () => { if (audio.duration) { trk.style.width = `${100 * audio.currentTime / audio.duration}%`; tm.textContent = fmt(audio.duration - audio.currentTime); } };
@@ -595,46 +579,16 @@
     document.getElementById('switch').onclick = () => { localStorage.removeItem('strada_user'); state.user = ''; state.subCache = {}; route(); };
   }
 
-  // ---------- read view: every stop of a topic on one page ----------
-  // Built from the marathon endpoint, which already carries each stop's text, figure and words. In-page jumps use
-  // data-jump (scrollIntoView) because a plain #anchor would change the hash the router reads.
-  async function readView(tid) {
-    setTab('home');
-    const back = `#/topic/${tid}`;
-    app.innerHTML = bar(back, 'Read') + `<div class="empty">Loading…</div>`;
-    let d;
-    try { d = await api(`/api/topics/${tid}/marathon`); } catch (e) { app.innerHTML = errorCard(e, `#/read/${tid}`); return; }
-    if (location.hash !== `#/read/${tid}`) return;              // left while loading
-    const { stops, questions } = d, n = stops.length;
-    const quiz = questions.length ? `<button class="btn primary" data-go="#/marathon/${tid}">Marathon · all ${questions.length} questions${stops.some(s => s.audio_url) ? ' + narration' : ''}</button>` : '';
-    if (!n) { app.innerHTML = bar(back, 'Read') + `<div class="empty">This topic has no stops yet.</div>`; return; }
-    const index = `<details class="card rindex" id="rindex"><summary>Jump to a stop · ${n} stops</summary>
-      <div class="list">${stops.map((s, i) => `<button data-jump="rs-${i}" data-close="1"><b>${i + 1}</b><span>${h(s.title_en)}</span></button>`).join('')}</div></details>`;
-    const section = (s, i) => `<section class="rstop" id="rs-${i}">
-        <div class="kind">Stop ${i + 1} of ${n}${s.title_it ? ` · ${h(s.title_it)}` : ''}</div>
-        <h2>${h(s.title_en)}</h2>
-        ${s.image_url ? `<div class="figure"><img src="${h(s.image_url)}" alt="" loading="lazy" decoding="async"></div>` : ''}
-        ${s.narration ? `<div class="narration">${narrationHtml(s.narration)}</div>` : '<p class="muted">No lesson text yet for this stop.</p>'}
-        ${s.terms ? `<h3>Words for this stop</h3><div class="terms">${termsHtml(s.terms)}</div>` : ''}
-        <div class="row rnav">${i > 0 ? `<button class="btn small quiet" data-jump="rs-${i - 1}">‹ Stop ${i}</button>` : '<span></span>'}<button class="btn small quiet" data-jump="rindex">↑ All stops</button>${i + 1 < n ? `<button class="btn small quiet" data-jump="rs-${i + 1}">Stop ${i + 2} ›</button>` : '<span></span>'}</div>
-      </section>`;
-    app.innerHTML = bar(back, 'Read') + `
-      <h1>${h(d.topic.title_en)}</h1>
-      <p class="muted">${h(d.topic.title_it)} · ${n} stops on one page. Tap a blue word to hear it in Italian.</p>
-      ${quiz}${index}
-      ${stops.map(section).join('')}
-      <div class="rstop">${quiz ? `<h3>Done reading?</h3>${gap(8)}${quiz}${gap(10)}` : ''}<button class="btn quiet" data-go="${back}">Back to topic</button></div>`;
-  }
-
-  // ---------- topic marathon: a whole topic's narration and every question in one session ----------
-  // One <audio> element plays the stops back to back (src + play() in `ended`, so iOS keeps allowing it after the
-  // first tap) while the questions below change without touching the player. The queue is saved after every
-  // answer, so leaving and coming back resumes where it stopped.
-  function stopMarathon() {
-    const m = state.marathon;
-    if (!m) return;
-    state.marathon = null;
-    const a = m.audio;
+  // ---------- screen 1 of the topic: every stop's text on one page, narrated stop after stop ----------
+  // The topic version of a stop's Teach screen: all the stops of the topic in order, with ONE <audio> element that
+  // plays their narration back to back (src + play() inside `ended`, so iOS keeps allowing it after the first tap).
+  // It never scrolls the reader away: the stop that is playing is only marked, and the player's title jumps to it
+  // on request. Leaving the screen by any route stops the audio (route() calls stopTopicAudio()).
+  // In-page jumps use data-jump (scrollIntoView) because a plain #anchor would change the hash the router reads.
+  function stopTopicAudio() {
+    const a = state.topicAudio;
+    if (!a) return;
+    state.topicAudio = null;
     a.onended = a.onerror = a.onplay = a.onplaying = a.onpause = a.ontimeupdate = null;
     a.pause(); a.removeAttribute('src'); a.load();
     if ('mediaSession' in navigator) {
@@ -643,27 +597,116 @@
     }
   }
 
+  async function readView(tid) {
+    setTab('home');
+    const back = `#/topic/${tid}`, here = `#/read/${tid}`;
+    app.innerHTML = bar(back, 'Topic lesson') + `<div class="empty">Loading…</div>`;
+    let d, stats;
+    try { [d, stats] = await Promise.all([api(`/api/topics/${tid}/marathon?part=lesson`), stopStats(tid)]); } catch (e) { app.innerHTML = errorCard(e, here); return; }
+    if (location.hash !== here) return;                          // left while loading
+    const { stops } = d, n = stops.length, qn = d.question_count || 0;
+    if (!n) { app.innerHTML = bar(back, 'Topic lesson') + `<div class="empty">This topic has no stops yet.</div>`; return; }
+    const tracks = stops.map((_, i) => i).filter(i => stops[i].audio_url);   // stops that have narration
+    const weak = stops.map((s, i) => [s, i]).filter(([s]) => stats.get(s.id)?.weak);
+    const cont = qn ? `<button class="btn primary" data-go="#/marathon/${tid}">Continue to the questions · ${qn}</button>` : '';
+
+    const index = `<details class="card rindex" id="rindex"><summary>Jump to a stop · ${n} stops</summary>
+      <div class="list">${stops.map((s, i) => `<button data-jump="rs-${i}" data-close="1"><b>${i + 1}</b><span>${h(s.title_en)}</span>${weakBadge(stats.get(s.id))}</button>`).join('')}</div></details>`;
+    const section = (s, i) => `<section class="rstop" id="rs-${i}">
+        <div class="kind">Stop ${i + 1} of ${n}${s.title_it ? ` · ${h(s.title_it)}` : ''}<span class="nowtag">▶ Playing now</span></div>
+        <h2>${h(s.title_en)}</h2>
+        ${weakBadge(stats.get(s.id), true)}
+        ${s.audio_url && tracks.length > 1 ? `<button class="btn small quiet rfrom" data-from="${i}">▶ Listen from here</button>` : ''}
+        ${s.image_url ? `<div class="figure"><img src="${h(s.image_url)}" alt="" loading="lazy" decoding="async"></div>` : ''}
+        ${s.narration ? `<div class="narration">${narrationHtml(s.narration)}</div>` : '<p class="muted">No lesson text yet for this stop.</p>'}
+        ${s.terms ? `<h3>Words for this stop</h3><div class="terms">${termsHtml(s.terms)}</div>` : ''}
+        <div class="row rnav">${i > 0 ? `<button class="btn small quiet" data-jump="rs-${i - 1}">‹ Stop ${i}</button>` : '<span></span>'}<button class="btn small quiet" data-jump="rindex">↑ All stops</button>${i + 1 < n ? `<button class="btn small quiet" data-jump="rs-${i + 1}">Stop ${i + 2} ›</button>` : '<span></span>'}</div>
+      </section>`;
+    const player = tracks.length ? `<div class="tplayer" id="tp">
+        <button class="ctl" id="tprev" aria-label="Previous stop">⏮</button><button class="ctl play" id="tpp" aria-label="Play or pause the narration">▶</button><button class="ctl" id="tnext" aria-label="Next stop">⏭</button>
+        <button class="tmeta" id="tmeta" aria-label="Jump to the stop that is playing"><span class="small muted" id="tn"></span><span class="tt" id="ttt"></span></button>
+        <div class="ttrack"><i id="ttrk"></i></div></div>`
+      : `<div class="card muted small">No narration audio for this topic yet. Read the text and tap any blue word to hear it.</div>${gap(12)}`;
+    app.innerHTML = bar(back, 'Topic lesson') + `
+      <h1>${h(d.topic.title_en)}</h1>
+      <p class="muted">${h(d.topic.title_it)} · ${n} stops on one page.${tracks.length ? ' Press play and the narration runs through the stops while you read.' : ''} Tap a blue word to hear it in Italian.</p>
+      ${cont}${gap(12)}${player}
+      ${weak.length ? `<div class="card weakcard"><strong>Needs extra attention</strong><div class="small muted">Your lowest accuracy in this topic so far:</div>
+        <div class="chips">${weak.map(([s, i]) => `<button class="chip" data-jump="rs-${i}">Stop ${i + 1} · ${stats.get(s.id).accuracy}%</button>`).join('')}</div></div>${gap(12)}` : ''}
+      ${index}
+      ${stops.map(section).join('')}
+      <div class="rstop" id="rend">${cont ? `<h3>Done reading?</h3>${gap(8)}${cont}${gap(10)}` : ''}<button class="btn quiet" data-go="${back}">Back to topic</button></div>`;
+    if (!tracks.length) return;
+
+    // --- narration: one element, started inside a tap ---
+    const audio = state.topicAudio = new Audio();
+    const pp = document.getElementById('tpp'), trk = document.getElementById('ttrk'), tn = document.getElementById('tn'), tt = document.getElementById('ttt'), meta = document.getElementById('tmeta');
+    const sections = stops.map((_, i) => document.getElementById(`rs-${i}`));
+    let ai = 0, started = false, finished = false, failures = 0;
+    function draw() {
+      sections.forEach((sec, i) => sec.classList.toggle('playing', started && !finished && tracks[ai] === i));
+      if (started && !finished) meta.dataset.jump = `rs-${tracks[ai]}`; else delete meta.dataset.jump;
+      if (!started) { tn.textContent = `Narration · ${tracks.length} stops`; tt.textContent = 'Tap play to listen'; }
+      else if (finished) { tn.textContent = 'Narration finished'; tt.textContent = 'Tap play to hear it again'; }
+      else { tn.textContent = `Stop ${tracks[ai] + 1} of ${n}`; tt.textContent = stops[tracks[ai]].title_en; }
+    }
+    function load() {                                            // always runs inside a tap or inside `ended`
+      started = true; finished = ai >= tracks.length;
+      trk.style.width = '0'; draw();
+      if (finished) { audio.pause(); return; }
+      const s = stops[tracks[ai]];
+      audio.src = s.audio_url;
+      const p = audio.play(); if (p && p.catch) p.catch(() => { /* blocked or interrupted: onpause shows the play button */ });
+      if ('mediaSession' in navigator && window.MediaMetadata) navigator.mediaSession.metadata = new MediaMetadata({ title: s.title_en, artist: 'STRADA', album: d.topic.title_en });
+    }
+    function prevStop() {
+      if (started && !finished && audio.currentTime > 3) { audio.currentTime = 0; return; }   // like a music player: first restart this stop
+      ai = Math.max(0, ai - 1); load();
+    }
+    const nextStop = () => { if (!finished) { ai = started ? ai + 1 : 1; load(); } };
+    const toggle = () => {
+      if (!started || finished) { ai = 0; load(); }
+      else if (audio.paused) { const p = audio.play(); if (p && p.catch) p.catch(() => {}); }
+      else audio.pause();
+    };
+    pp.onclick = toggle;
+    document.getElementById('tprev').onclick = prevStop;
+    document.getElementById('tnext').onclick = nextStop;
+    app.querySelectorAll('[data-from]').forEach(b => b.onclick = () => { ai = tracks.indexOf(+b.dataset.from); load(); });
+    audio.onplay = () => pp.textContent = '❚❚';
+    audio.onplaying = () => { failures = 0; };
+    audio.onpause = () => pp.textContent = '▶';
+    audio.ontimeupdate = () => { if (audio.duration && started && !finished) { trk.style.width = `${100 * audio.currentTime / audio.duration}%`; tn.textContent = `Stop ${tracks[ai] + 1} of ${n} · ${fmt(audio.duration - audio.currentTime)} left`; } };
+    audio.onended = () => { post('/api/subtopic_progress', { subtopic_id: stops[tracks[ai]].id, lesson_done: true }); ai++; load(); };
+    audio.onerror = () => {
+      if (++failures >= 3) { toast('Narration would not load. Check the connection.'); pp.textContent = '▶'; return; }
+      toast('That stop would not play, skipping it'); ai++; load();
+    };
+    if ('mediaSession' in navigator) {
+      const set = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch (_) { /* unsupported */ } };
+      set('play', toggle); set('pause', () => audio.pause()); set('previoustrack', prevStop); set('nexttrack', nextStop);
+    }
+    draw();
+  }
+
+  // ---------- screen 2 of the topic: every question of the topic in one session ----------
+  // The topic version of a stop's Quiz: no audio and no lesson text here (that is screen 1, the topic lesson). The
+  // queue is saved after every answer, so leaving and coming back resumes where it stopped.
   async function marathon(tid) {
     setTab('home');
-    stopPlaylist(); stopMarathon();
     const back = `#/topic/${tid}`;
-    app.innerHTML = bar(back, 'Marathon') + `<div class="empty">Loading…</div>`;
+    app.innerHTML = bar(back, 'Topic questions') + `<div class="empty">Loading…</div>`;
     let d;
-    try { d = await api(`/api/topics/${tid}/marathon`); } catch (e) { app.innerHTML = errorCard(e, `#/marathon/${tid}`); return; }
+    try { d = await api(`/api/topics/${tid}/marathon?part=questions`); } catch (e) { app.innerHTML = errorCard(e, `#/marathon/${tid}`); return; }
     if (location.hash !== `#/marathon/${tid}`) return;           // left while loading
     const { stops, questions } = d, total = questions.length, title = d.topic.title_en;
-    const tracks = stops.map((_, i) => i).filter(i => stops[i].audio_url);   // stops that have narration
-    if (!total) { app.innerHTML = bar(back, 'Marathon') + `<div class="empty">This topic has no questions yet.</div>`; return; }
-
-    const audio = new Audio();
-    const mine = state.marathon = { audio };
-    window.addEventListener('hashchange', () => { if (state.marathon === mine) stopMarathon(); }, { once: true });
+    if (!total) { app.innerHTML = bar(back, 'Topic questions') + `<div class="empty">This topic has no questions yet.</div>`; return; }
 
     // --- session state, saved per user + topic ---
     const key = `strada_marathon:${state.user}:${tid}`;
     const qById = new Map(questions.map(q => [q.id, q]));
-    let finished = false, queue = [], cleared = new Set(), firstTry = 0, answers = 0, missed = new Map(), unsent = [], ai = 0, current = null;
-    const fresh = () => { queue = questions.map(q => ({ q, w: false, s: 0 })); cleared = new Set(); firstTry = 0; answers = 0; missed = new Map(); unsent = []; ai = 0; };
+    let finished = false, queue = [], cleared = new Set(), firstTry = 0, answers = 0, missed = new Map(), unsent = [], current = null;
+    const fresh = () => { queue = questions.map(q => ({ q, w: false, s: 0 })); cleared = new Set(); firstTry = 0; answers = 0; missed = new Map(); unsent = []; };
     const saved = (() => { try { const v = JSON.parse(localStorage.getItem(key)); return v && v.v === 1 ? v : null; } catch (_) { return null; } })();
     if (saved) {
       cleared = new Set((saved.c || []).filter(id => qById.has(id)));
@@ -672,13 +715,12 @@
       for (const q of questions) if (!cleared.has(q.id) && !inQ.has(q.id)) queue.push({ q, w: false, s: 0 });   // questions added since
       firstTry = saved.ft || 0; answers = saved.n || 0; unsent = saved.u || [];
       missed = new Map((saved.m || []).filter(id => qById.has(id)).map(id => [id, qById.get(id)]));
-      ai = Math.max(0, tracks.indexOf(saved.a));
     } else fresh();
     const save = () => {
       if (finished) return;
       try {
         localStorage.setItem(key, JSON.stringify({ v: 1, q: (current ? [current, ...queue] : queue).map(x => [x.q.id, x.w ? 1 : 0, x.s]),
-          c: [...cleared], ft: firstTry, n: answers, m: [...missed.keys()], a: tracks[ai] ?? 0, u: unsent }));
+          c: [...cleared], ft: firstTry, n: answers, m: [...missed.keys()], u: unsent }));
       } catch (_) { /* storage full or blocked: the answers are still saved on the server */ }
     };
     // an answer that could not reach the server waits in `unsent` and goes out in a batch after the next one that does
@@ -698,86 +740,26 @@
 
     // --- intro ---
     const hasSaved = !!saved && (cleared.size > 0 || answers > 0 || queue.some(x => !isNew(x)));
-    app.innerHTML = bar(back, 'Marathon') + `
+    app.innerHTML = bar(back, 'Topic questions') + `
       <h1>${h(title)}</h1>
-      <p class="muted">Marathon · ${stops.length} stops · ${total} questions</p>
-      <div class="card"><p style="margin:0">${tracks.length ? 'The narration plays stop after stop' : 'There is no narration for this topic yet, but all the questions are here'} while you answer <strong>every question in this topic</strong>, in stop order. Wrong ones come back until you get them twice. Every answer is saved, so you can stop whenever you like and pick up here.</p></div>${gap(12)}
-      ${hasSaved ? `<div class="card"><strong>${seenCount()} of ${total} answered</strong><div class="small muted">${pending().length} still in the queue${tracks.length ? ` · narration at stop ${tracks[ai] + 1}` : ''}</div></div>${gap(12)}` : ''}
-      <div class="stack"><button class="btn primary" id="mgo">${hasSaved ? 'Resume' : 'Start'} marathon</button>
+      <p class="muted">Topic questions · ${stops.length} stops · ${total} questions</p>
+      <div class="card"><p style="margin:0">Every question in this topic, in stop order. Wrong ones come back until you get them twice. Every answer is saved, so you can stop whenever you like and pick up here.</p></div>${gap(12)}
+      ${hasSaved ? `<div class="card"><strong>${seenCount()} of ${total} answered</strong><div class="small muted">${pending().length} still in the queue</div></div>${gap(12)}` : ''}
+      <div class="stack"><button class="btn primary" id="mgo">${hasSaved ? 'Resume' : 'Start'} the questions</button>
         ${hasSaved ? '<button class="btn quiet" id="mreset">Start over</button>' : ''}
-        <button class="btn quiet" data-go="#/read/${tid}">Read the topic first</button>
+        <button class="btn quiet" data-go="#/read/${tid}">Back to the topic lesson</button>
         <button class="btn quiet" data-go="${back}">Back to topic</button></div>`;
     document.getElementById('mgo').onclick = begin;
     const reset = document.getElementById('mreset');
-    if (reset) reset.onclick = () => { if (confirm('Start the marathon over? Your place in the queue is cleared (answers already recorded stay).')) { try { localStorage.removeItem(key); } catch (_) { /* ignore */ } marathon(tid); } };
+    if (reset) reset.onclick = () => { if (confirm('Start the topic questions over? Your place in the queue is cleared (answers already recorded stay).')) { try { localStorage.removeItem(key); } catch (_) { /* ignore */ } marathon(tid); } };
 
     // --- running screen ---
-    let mq, narrationDone = false, failures = 0;
-    function begin() {                                            // runs inside the tap, so audio.play() is allowed
-      app.innerHTML = bar(back, `${title} · marathon`) + `
-        ${tracks.length ? `<div class="mplayer" id="mp">
-          <button class="ctl" id="mprev" aria-label="Previous stop">⏮</button><button class="ctl play" id="mpp" aria-label="Play or pause narration">▶</button><button class="ctl" id="mnext" aria-label="Next stop">⏭</button>
-          <div class="mt"><div class="small muted" id="mn"></div><div class="tt" id="mtt"></div></div><div class="mtrack"><i id="mtrk"></i></div></div>` : ''}
-        <div id="mstat"></div><div id="mq"></div>${tracks.length ? '<div id="mtext"></div>' : ''}`;
+    let mq;
+    function begin() {
+      app.innerHTML = bar(back, `${title} · questions`) + `<div id="mstat"></div><div id="mq"></div>`;
       mq = document.getElementById('mq');
-      if (tracks.length) { wirePlayer(); playTrack(); }
       next();
       if (unsent.length) flush();
-    }
-
-    // --- narration ---
-    function drawPlayer() {
-      const n = document.getElementById('mn'), t = document.getElementById('mtt');
-      if (!n) return;
-      if (narrationDone) { n.textContent = 'Narration finished'; t.textContent = 'Tap play to hear it again'; return; }
-      n.textContent = `Stop ${ai + 1} of ${tracks.length}`; t.textContent = stops[tracks[ai]].title_en;
-    }
-    // the text of the stop that is playing, under the questions so it never moves the answer buttons; the choice to show it is remembered
-    const textOn = () => { try { return localStorage.getItem('strada_mtext') !== '0'; } catch (_) { return true; } };
-    function drawText() {
-      const box = document.getElementById('mtext');
-      if (!box) return;
-      const on = textOn(), s = narrationDone ? null : stops[tracks[ai]];
-      const label = s ? `Text · stop ${ai + 1} of ${tracks.length}` : 'Text of the narration';
-      box.innerHTML = `${gap(18)}<div class="mtext"><div class="mthead"><strong class="small">${label}</strong>
-        <span><button class="btn small quiet" data-go="#/read/${tid}">Read all</button><button class="btn small quiet" id="mtog" aria-expanded="${on}">${on ? 'Hide text' : 'Show text'}</button></span></div>
-        ${on ? (s ? `<h3>${h(s.title_en)}</h3>${s.narration ? `<div class="narration">${narrationHtml(s.narration)}</div>` : '<p class="muted small">No text for this stop.</p>'}`
-          : '<p class="muted small">The narration has finished. Tap play above to hear it again.</p>') : ''}</div>`;
-      document.getElementById('mtog').onclick = () => { try { localStorage.setItem('strada_mtext', on ? '0' : '1'); } catch (_) { /* ignore */ } drawText(); };
-    }
-    function playTrack() {
-      narrationDone = ai >= tracks.length;
-      drawPlayer(); drawText(); save();
-      const trk = document.getElementById('mtrk'); if (trk) trk.style.width = '0';
-      if (narrationDone) { audio.pause(); return; }
-      const s = stops[tracks[ai]];
-      audio.src = s.audio_url;
-      const p = audio.play(); if (p && p.catch) p.catch(() => { /* blocked or interrupted: onpause shows the play button */ });
-      if ('mediaSession' in navigator && window.MediaMetadata) navigator.mediaSession.metadata = new MediaMetadata({ title: s.title_en, artist: 'STRADA', album: title });
-    }
-    function prevStop() {
-      if (!narrationDone && audio.currentTime > 3) { audio.currentTime = 0; return; }   // like a music player: first restart this stop
-      ai = Math.max(0, ai - 1); playTrack();
-    }
-    const nextStop = () => { if (!narrationDone) { ai++; playTrack(); } };
-    function wirePlayer() {
-      const pp = document.getElementById('mpp'), trk = document.getElementById('mtrk'), n = document.getElementById('mn');
-      pp.onclick = () => { if (narrationDone) { ai = 0; playTrack(); } else if (audio.paused) { const p = audio.play(); if (p && p.catch) p.catch(() => {}); } else audio.pause(); };
-      document.getElementById('mprev').onclick = prevStop;
-      document.getElementById('mnext').onclick = nextStop;
-      audio.onplay = () => pp.textContent = '❚❚';
-      audio.onplaying = () => { failures = 0; };
-      audio.onpause = () => pp.textContent = '▶';
-      audio.ontimeupdate = () => { if (audio.duration) { trk.style.width = `${100 * audio.currentTime / audio.duration}%`; n.textContent = `Stop ${ai + 1} of ${tracks.length} · ${fmt(audio.duration - audio.currentTime)} left`; } };
-      audio.onended = () => { post('/api/subtopic_progress', { subtopic_id: stops[tracks[ai]].id, lesson_done: true }); ai++; playTrack(); };
-      audio.onerror = () => {
-        if (++failures >= 3) { toast('Narration would not load. Check the connection.'); pp.textContent = '▶'; return; }
-        toast('That stop would not play, skipping it'); ai++; playTrack();
-      };
-      if ('mediaSession' in navigator) {
-        const set = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch (_) { /* unsupported */ } };
-        set('play', () => audio.play()); set('pause', () => audio.pause()); set('previoustrack', prevStop); set('nexttrack', nextStop);
-      }
     }
 
     // --- questions ---
@@ -854,6 +836,7 @@
     const [path, arg] = location.hash.replace(/^#\/?/, '').split('/');
     window.scrollTo(0, 0);
     window.speechSynthesis?.cancel();
+    stopTopicAudio();                                           // no screen keeps playing the topic narration after it is left
     switch (path) {
       case '': return home();
       case 'topic': return topic(arg);
@@ -877,7 +860,7 @@
     navigator.serviceWorker.register('/sw.js').catch(() => {});
     // A screen is painted from the cache first; when the server's answer turns out to differ, redraw —
     // but only where redrawing costs nothing. A quiz, exam or review in progress keeps its state.
-    const REDRAWABLE = ['', 'topic', 'stats', 'read'];
+    const REDRAWABLE = ['', 'topic', 'stats'];
     const redrawn = {};
     navigator.serviceWorker.addEventListener('message', e => {
       if (e.data?.type !== 'api-updated') return;
