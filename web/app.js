@@ -56,6 +56,7 @@
     return out;
   }
   const narrationHtml = n => h(n).replace(/\[\[(.+?)\]\]/g, (_, t) => `<button class="term" data-say="${h(t)}">${h(t)}</button>`);
+  const termsHtml = list => (list || []).map(t => `<button data-say="${h(t.it)}"><span class="it">${h(t.it)}</span> — ${h(t.en)}${t.note ? `<div class="note">${h(t.note)}</div>` : ''}</button>`).join('');
 
   function setTab(name) { tabs.querySelectorAll('a').forEach(a => a.classList.toggle('on', a.dataset.tab === name)); }
   // the bar is fixed over the page; publish its height so nothing ends up hidden behind it
@@ -84,6 +85,12 @@
     if (lock) { toast(lock.dataset.locked); return; }
     const go = e.target.closest('[data-go]');
     if (go) { location.hash = go.dataset.go; return; }
+    const jump = e.target.closest('[data-jump]');
+    if (jump) {                                                   // in-page anchors: a bare #id would be read by the hash router
+      const box = jump.closest('details'); if (box && jump.dataset.close) box.open = false;
+      document.getElementById(jump.dataset.jump)?.scrollIntoView({ block: 'start' });
+      return;
+    }
     const say = e.target.closest('[data-say]');
     if (say) speakIt(say.dataset.say);
   });
@@ -139,8 +146,9 @@
       <p class="muted">${subs.filter(s => s.quiz_passed).length} of ${subs.length} stops passed. Stops unlock in order as you pass each quiz.</p>
       <div class="row">
         <button class="btn" data-go="#/topic-test/${tid}">Topic test</button>
-        ${withAudio ? `<button class="btn" id="playall">Listen to all ${withAudio} stops</button>` : ''}
+        <button class="btn" data-go="#/read/${tid}">Read the topic</button>
       </div>
+      ${withAudio ? `${gap(10)}<button class="btn" id="playall">Listen to all ${withAudio} stops</button>` : ''}
       ${marathonQs ? `${gap(10)}<button class="btn primary" data-go="#/marathon/${tid}">Marathon · all ${marathonQs} questions + narration</button>` : ''}${gap(16)}
       <div class="road">${subs.map((s, i) => {
         const locked = isLocked(s.ord, i > 0 && subs[i - 1].quiz_passed);
@@ -200,7 +208,7 @@
     try { d = await loadSub(sid, true); } catch (e) { app.innerHTML = errorCard(e, `#/lesson/${sid}`); return; }
     const s = d.subtopic, p = d.progress || {};
     if (isLocked(s.ord, d.prev_passed)) { app.innerHTML = lockedCard(d); return; }
-    const terms = (d.terms || []).map(t => `<button data-say="${h(t.it)}"><span class="it">${h(t.it)}</span> — ${h(t.en)}${t.note ? `<div class="note">${h(t.note)}</div>` : ''}</button>`).join('');
+    const terms = termsHtml(d.terms);
     app.innerHTML = bar(`#/topic/${s.topic_id}`, d.topic.title_en) + stepper('teach', p.quiz_passed) + `
       <h1>${h(s.title_en)}${p.quiz_passed ? `<span class="badge green">passed · ${p.best_accuracy}%</span>` : ''}</h1>
       <p class="muted">${h(s.title_it)} · stop ${s.ord}</p>
@@ -587,6 +595,37 @@
     document.getElementById('switch').onclick = () => { localStorage.removeItem('strada_user'); state.user = ''; state.subCache = {}; route(); };
   }
 
+  // ---------- read view: every stop of a topic on one page ----------
+  // Built from the marathon endpoint, which already carries each stop's text, figure and words. In-page jumps use
+  // data-jump (scrollIntoView) because a plain #anchor would change the hash the router reads.
+  async function readView(tid) {
+    setTab('home');
+    const back = `#/topic/${tid}`;
+    app.innerHTML = bar(back, 'Read') + `<div class="empty">Loading…</div>`;
+    let d;
+    try { d = await api(`/api/topics/${tid}/marathon`); } catch (e) { app.innerHTML = errorCard(e, `#/read/${tid}`); return; }
+    if (location.hash !== `#/read/${tid}`) return;              // left while loading
+    const { stops, questions } = d, n = stops.length;
+    const quiz = questions.length ? `<button class="btn primary" data-go="#/marathon/${tid}">Marathon · all ${questions.length} questions${stops.some(s => s.audio_url) ? ' + narration' : ''}</button>` : '';
+    if (!n) { app.innerHTML = bar(back, 'Read') + `<div class="empty">This topic has no stops yet.</div>`; return; }
+    const index = `<details class="card rindex" id="rindex"><summary>Jump to a stop · ${n} stops</summary>
+      <div class="list">${stops.map((s, i) => `<button data-jump="rs-${i}" data-close="1"><b>${i + 1}</b><span>${h(s.title_en)}</span></button>`).join('')}</div></details>`;
+    const section = (s, i) => `<section class="rstop" id="rs-${i}">
+        <div class="kind">Stop ${i + 1} of ${n}${s.title_it ? ` · ${h(s.title_it)}` : ''}</div>
+        <h2>${h(s.title_en)}</h2>
+        ${s.image_url ? `<div class="figure"><img src="${h(s.image_url)}" alt="" loading="lazy" decoding="async"></div>` : ''}
+        ${s.narration ? `<div class="narration">${narrationHtml(s.narration)}</div>` : '<p class="muted">No lesson text yet for this stop.</p>'}
+        ${s.terms ? `<h3>Words for this stop</h3><div class="terms">${termsHtml(s.terms)}</div>` : ''}
+        <div class="row rnav">${i > 0 ? `<button class="btn small quiet" data-jump="rs-${i - 1}">‹ Stop ${i}</button>` : '<span></span>'}<button class="btn small quiet" data-jump="rindex">↑ All stops</button>${i + 1 < n ? `<button class="btn small quiet" data-jump="rs-${i + 1}">Stop ${i + 2} ›</button>` : '<span></span>'}</div>
+      </section>`;
+    app.innerHTML = bar(back, 'Read') + `
+      <h1>${h(d.topic.title_en)}</h1>
+      <p class="muted">${h(d.topic.title_it)} · ${n} stops on one page. Tap a blue word to hear it in Italian.</p>
+      ${quiz}${index}
+      ${stops.map(section).join('')}
+      <div class="rstop">${quiz ? `<h3>Done reading?</h3>${gap(8)}${quiz}${gap(10)}` : ''}<button class="btn quiet" data-go="${back}">Back to topic</button></div>`;
+  }
+
   // ---------- topic marathon: a whole topic's narration and every question in one session ----------
   // One <audio> element plays the stops back to back (src + play() in `ended`, so iOS keeps allowing it after the
   // first tap) while the questions below change without touching the player. The queue is saved after every
@@ -666,6 +705,7 @@
       ${hasSaved ? `<div class="card"><strong>${seenCount()} of ${total} answered</strong><div class="small muted">${pending().length} still in the queue${tracks.length ? ` · narration at stop ${tracks[ai] + 1}` : ''}</div></div>${gap(12)}` : ''}
       <div class="stack"><button class="btn primary" id="mgo">${hasSaved ? 'Resume' : 'Start'} marathon</button>
         ${hasSaved ? '<button class="btn quiet" id="mreset">Start over</button>' : ''}
+        <button class="btn quiet" data-go="#/read/${tid}">Read the topic first</button>
         <button class="btn quiet" data-go="${back}">Back to topic</button></div>`;
     document.getElementById('mgo').onclick = begin;
     const reset = document.getElementById('mreset');
@@ -678,7 +718,7 @@
         ${tracks.length ? `<div class="mplayer" id="mp">
           <button class="ctl" id="mprev" aria-label="Previous stop">⏮</button><button class="ctl play" id="mpp" aria-label="Play or pause narration">▶</button><button class="ctl" id="mnext" aria-label="Next stop">⏭</button>
           <div class="mt"><div class="small muted" id="mn"></div><div class="tt" id="mtt"></div></div><div class="mtrack"><i id="mtrk"></i></div></div>` : ''}
-        <div id="mstat"></div><div id="mq"></div>`;
+        <div id="mstat"></div><div id="mq"></div>${tracks.length ? '<div id="mtext"></div>' : ''}`;
       mq = document.getElementById('mq');
       if (tracks.length) { wirePlayer(); playTrack(); }
       next();
@@ -692,9 +732,22 @@
       if (narrationDone) { n.textContent = 'Narration finished'; t.textContent = 'Tap play to hear it again'; return; }
       n.textContent = `Stop ${ai + 1} of ${tracks.length}`; t.textContent = stops[tracks[ai]].title_en;
     }
+    // the text of the stop that is playing, under the questions so it never moves the answer buttons; the choice to show it is remembered
+    const textOn = () => { try { return localStorage.getItem('strada_mtext') !== '0'; } catch (_) { return true; } };
+    function drawText() {
+      const box = document.getElementById('mtext');
+      if (!box) return;
+      const on = textOn(), s = narrationDone ? null : stops[tracks[ai]];
+      const label = s ? `Text · stop ${ai + 1} of ${tracks.length}` : 'Text of the narration';
+      box.innerHTML = `${gap(18)}<div class="mtext"><div class="mthead"><strong class="small">${label}</strong>
+        <span><button class="btn small quiet" data-go="#/read/${tid}">Read all</button><button class="btn small quiet" id="mtog" aria-expanded="${on}">${on ? 'Hide text' : 'Show text'}</button></span></div>
+        ${on ? (s ? `<h3>${h(s.title_en)}</h3>${s.narration ? `<div class="narration">${narrationHtml(s.narration)}</div>` : '<p class="muted small">No text for this stop.</p>'}`
+          : '<p class="muted small">The narration has finished. Tap play above to hear it again.</p>') : ''}</div>`;
+      document.getElementById('mtog').onclick = () => { try { localStorage.setItem('strada_mtext', on ? '0' : '1'); } catch (_) { /* ignore */ } drawText(); };
+    }
     function playTrack() {
       narrationDone = ai >= tracks.length;
-      drawPlayer(); save();
+      drawPlayer(); drawText(); save();
       const trk = document.getElementById('mtrk'); if (trk) trk.style.width = '0';
       if (narrationDone) { audio.pause(); return; }
       const s = stops[tracks[ai]];
@@ -809,6 +862,7 @@
       case 'quiz': return quiz(arg);
       case 'topic-test': return topicTest(arg);
       case 'marathon': return marathon(arg);
+      case 'read': return readView(arg);
       case 'repair': return repairView();
       case 'review': return reviewView();
       case 'words': return wordsView();
@@ -823,7 +877,7 @@
     navigator.serviceWorker.register('/sw.js').catch(() => {});
     // A screen is painted from the cache first; when the server's answer turns out to differ, redraw —
     // but only where redrawing costs nothing. A quiz, exam or review in progress keeps its state.
-    const REDRAWABLE = ['', 'topic', 'stats'];
+    const REDRAWABLE = ['', 'topic', 'stats', 'read'];
     navigator.serviceWorker.addEventListener('message', e => {
       if (e.data?.type !== 'api-updated') return;
       if (REDRAWABLE.includes(location.hash.replace(/^#\/?/, '').split('/')[0])) route();

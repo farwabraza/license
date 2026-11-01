@@ -250,19 +250,45 @@ def topic(tid: str, user: str = Query(...)):
 
 
 MARATHON_Q_OPTIONAL = ("image_url", "q_en", "trap_words", "why_en", "reform_check")
+MARATHON_STOP_OPTIONAL = ("title_it", "image_url", "narration", "audio_url")
+
+
+def stop_terms(s, term_rows):
+    """A stop's word list as lean dicts (it, en, note), in the order the words first appear in its narration."""
+    text = s.get("narration") or ""
+
+    def first_use(t):
+        i = text.find("[[" + t["it"] + "]]")
+        return i if i >= 0 else len(text)
+    out = []
+    for t in sorted(term_rows, key=first_use):
+        row = {"it": t["it"], "en": t["en"]}
+        if t.get("note"):
+            row["note"] = t["note"]
+        out.append(row)
+    return out
 
 
 @app.get("/api/topics/{tid}/marathon")
 def topic_marathon(tid: str):
-    """Everything the marathon screen needs for one topic, in stop order: each stop's audio and every question.
-    Built from the content cache into fresh dicts (the cached rows are never touched), lean: empty fields are left out."""
+    """Everything the marathon and read screens need for one topic, in stop order: each stop's title, figure, audio,
+    narration and word list, plus every question. Built from the content cache into fresh dicts (the cached rows are
+    never touched), lean: empty fields are left out."""
     t = content("topics")["by_id"].get(tid)
     if not t:
         raise HTTPException(404, "topic not found")
     by_sub = content("questions")["by_sub"]
+    terms_by_sub = content("terms")["by_sub"]
     stops, qs = [], []
     for i, s in enumerate(content("subtopics")["by_topic"].get(tid, [])):
-        stops.append({"id": s["id"], "ord": s["ord"], "title_en": s["title_en"], "audio_url": s.get("audio_url")})
+        stop = {"id": s["id"], "ord": s["ord"], "title_en": s["title_en"]}
+        for k in MARATHON_STOP_OPTIONAL:
+            if s.get(k):
+                stop[k] = s[k]
+        words = stop_terms(s, terms_by_sub.get(s["id"], []))
+        if words:
+            stop["terms"] = words
+        stops.append(stop)
         # the listato prints a block as its true statements then its false ones; keep stop order, because the
         # narration follows it, but shuffle inside a stop so the answers cannot be read off the position
         stop_qs = list(by_sub.get(s["id"], []))
