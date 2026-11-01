@@ -263,7 +263,11 @@ def topic_marathon(tid: str):
     stops, qs = [], []
     for i, s in enumerate(content("subtopics")["by_topic"].get(tid, [])):
         stops.append({"id": s["id"], "ord": s["ord"], "title_en": s["title_en"], "audio_url": s.get("audio_url")})
-        for q in by_sub.get(s["id"], []):
+        # the listato prints a block as its true statements then its false ones; keep stop order, because the
+        # narration follows it, but shuffle inside a stop so the answers cannot be read off the position
+        stop_qs = list(by_sub.get(s["id"], []))
+        random.shuffle(stop_qs)
+        for q in stop_qs:
             row = {"id": q["id"], "stop": i, "q_it": q["q_it"], "answer": q["answer"]}
             for k in MARATHON_Q_OPTIONAL:
                 if q.get(k):
@@ -281,7 +285,8 @@ def subtopic(sid: str, user: str = Query(...)):
         raise HTTPException(404, "sub-topic not found")
     s = dict(row)
     qs = copies(content("questions")["by_sub"].get(sid, []))
-    pm = progress_map(user, [q["id"] for q in qs])
+    random.shuffle(qs)                       # stored order is every Vero then every Falso; the sort below is
+    pm = progress_map(user, [q["id"] for q in qs])   # stable, so this is what breaks ties for unseen questions
     for q in qs:
         p = pm.get(q["id"])
         q["box"] = p["box"] if p else 0
