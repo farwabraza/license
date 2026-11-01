@@ -9,6 +9,7 @@
     subCache: {},
     health: null,
     playlist: null,
+    marathon: null,
   };
 
   // ---------- utils ----------
@@ -127,13 +128,15 @@
     const subs = d.subtopics;
     const nextId = (subs.find(s => !s.quiz_passed) || {}).id;
     const withAudio = subs.filter(s => s.audio_url).length;
+    const marathonQs = subs.reduce((a, s) => a + s.question_count, 0);
     app.innerHTML = bar('#/', d.topic.title_it) + `
       <h1>${h(d.topic.title_en)}${d.mastered ? '<span class="badge green">mastered</span>' : ''}</h1>
       <p class="muted">${subs.filter(s => s.quiz_passed).length} of ${subs.length} stops passed. Stops unlock in order as you pass each quiz.</p>
       <div class="row">
         <button class="btn" data-go="#/topic-test/${tid}">Topic test</button>
         ${withAudio ? `<button class="btn" id="playall">Listen to all ${withAudio} stops</button>` : ''}
-      </div>${gap(16)}
+      </div>
+      ${marathonQs ? `${gap(10)}<button class="btn primary" data-go="#/marathon/${tid}">Marathon · all ${marathonQs} questions + narration</button>` : ''}${gap(16)}
       <div class="road">${subs.map((s, i) => {
         const locked = isLocked(s.ord, i > 0 && subs[i - 1].quiz_passed);
         const cls = s.quiz_passed ? 'done' : s.lesson_done || s.review_done ? 'started' : '';
@@ -577,6 +580,213 @@
     document.getElementById('switch').onclick = () => { localStorage.removeItem('strada_user'); state.user = ''; state.subCache = {}; route(); };
   }
 
+  // ---------- topic marathon: a whole topic's narration and every question in one session ----------
+  // One <audio> element plays the stops back to back (src + play() in `ended`, so iOS keeps allowing it after the
+  // first tap) while the questions below change without touching the player. The queue is saved after every
+  // answer, so leaving and coming back resumes where it stopped.
+  function stopMarathon() {
+    const m = state.marathon;
+    if (!m) return;
+    state.marathon = null;
+    const a = m.audio;
+    a.onended = a.onerror = a.onplay = a.onplaying = a.onpause = a.ontimeupdate = null;
+    a.pause(); a.removeAttribute('src'); a.load();
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = null;
+      for (const act of ['play', 'pause', 'previoustrack', 'nexttrack']) { try { navigator.mediaSession.setActionHandler(act, null); } catch (_) { /* unsupported */ } }
+    }
+  }
+
+  async function marathon(tid) {
+    setTab('home');
+    stopPlaylist(); stopMarathon();
+    const back = `#/topic/${tid}`;
+    app.innerHTML = bar(back, 'Marathon') + `<div class="empty">Loading…</div>`;
+    let d;
+    try { d = await api(`/api/topics/${tid}/marathon`); } catch (e) { app.innerHTML = errorCard(e, `#/marathon/${tid}`); return; }
+    if (location.hash !== `#/marathon/${tid}`) return;           // left while loading
+    const { stops, questions } = d, total = questions.length, title = d.topic.title_en;
+    const tracks = stops.map((_, i) => i).filter(i => stops[i].audio_url);   // stops that have narration
+    if (!total) { app.innerHTML = bar(back, 'Marathon') + `<div class="empty">This topic has no questions yet.</div>`; return; }
+
+    const audio = new Audio();
+    const mine = state.marathon = { audio };
+    window.addEventListener('hashchange', () => { if (state.marathon === mine) stopMarathon(); }, { once: true });
+
+    // --- session state, saved per user + topic ---
+    const key = `strada_marathon:${state.user}:${tid}`;
+    const qById = new Map(questions.map(q => [q.id, q]));
+    let finished = false, queue = [], cleared = new Set(), firstTry = 0, answers = 0, missed = new Map(), unsent = [], ai = 0, current = null;
+    const fresh = () => { queue = questions.map(q => ({ q, w: false, s: 0 })); cleared = new Set(); firstTry = 0; answers = 0; missed = new Map(); unsent = []; ai = 0; };
+    const saved = (() => { try { const v = JSON.parse(localStorage.getItem(key)); return v && v.v === 1 ? v : null; } catch (_) { return null; } })();
+    if (saved) {
+      cleared = new Set((saved.c || []).filter(id => qById.has(id)));
+      const inQ = new Set();
+      for (const [id, w, s] of saved.q || []) if (qById.has(id) && !cleared.has(id) && !inQ.has(id)) { queue.push({ q: qById.get(id), w: !!w, s }); inQ.add(id); }
+      for (const q of questions) if (!cleared.has(q.id) && !inQ.has(q.id)) queue.push({ q, w: false, s: 0 });   // questions added since
+      firstTry = saved.ft || 0; answers = saved.n || 0; unsent = saved.u || [];
+      missed = new Map((saved.m || []).filter(id => qById.has(id)).map(id => [id, qById.get(id)]));
+      ai = Math.max(0, tracks.indexOf(saved.a));
+    } else fresh();
+    const save = () => {
+      if (finished) return;
+      try {
+        localStorage.setItem(key, JSON.stringify({ v: 1, q: (current ? [current, ...queue] : queue).map(x => [x.q.id, x.w ? 1 : 0, x.s]),
+          c: [...cleared], ft: firstTry, n: answers, m: [...missed.keys()], a: tracks[ai] ?? 0, u: unsent }));
+      } catch (_) { /* storage full or blocked: the answers are still saved on the server */ }
+    };
+    // an answer that could not reach the server waits in `unsent` and goes out in a batch after the next one that does
+    async function flush() {
+      const batch = unsent.splice(0);
+      try { await api('/api/answers', { answers: batch.map(a => ({ user: state.user, ...a })) }); }
+      catch (_) { unsent.unshift(...batch); unsent.splice(0, Math.max(0, unsent.length - 500)); }
+      save();
+    }
+    async function send(question_id, correct) {
+      try { await api('/api/answer', { question_id, correct }); if (unsent.length) flush(); }
+      catch (_) { unsent.push({ question_id, correct }); save(); }
+    }
+    const pending = () => current ? [current, ...queue] : queue;
+    const isNew = x => !x.w && !x.s;
+    const seenCount = () => total - pending().filter(isNew).length;
+
+    // --- intro ---
+    const hasSaved = !!saved && (cleared.size > 0 || answers > 0 || queue.some(x => !isNew(x)));
+    app.innerHTML = bar(back, 'Marathon') + `
+      <h1>${h(title)}</h1>
+      <p class="muted">Marathon · ${stops.length} stops · ${total} questions</p>
+      <div class="card"><p style="margin:0">${tracks.length ? 'The narration plays stop after stop' : 'There is no narration for this topic yet, but all the questions are here'} while you answer <strong>every question in this topic</strong>, in stop order. Wrong ones come back until you get them twice. Every answer is saved, so you can stop whenever you like and pick up here.</p></div>${gap(12)}
+      ${hasSaved ? `<div class="card"><strong>${seenCount()} of ${total} answered</strong><div class="small muted">${pending().length} still in the queue${tracks.length ? ` · narration at stop ${tracks[ai] + 1}` : ''}</div></div>${gap(12)}` : ''}
+      <div class="stack"><button class="btn primary" id="mgo">${hasSaved ? 'Resume' : 'Start'} marathon</button>
+        ${hasSaved ? '<button class="btn quiet" id="mreset">Start over</button>' : ''}
+        <button class="btn quiet" data-go="${back}">Back to topic</button></div>`;
+    document.getElementById('mgo').onclick = begin;
+    const reset = document.getElementById('mreset');
+    if (reset) reset.onclick = () => { if (confirm('Start the marathon over? Your place in the queue is cleared (answers already recorded stay).')) { try { localStorage.removeItem(key); } catch (_) { /* ignore */ } marathon(tid); } };
+
+    // --- running screen ---
+    let mq, narrationDone = false, failures = 0;
+    function begin() {                                            // runs inside the tap, so audio.play() is allowed
+      app.innerHTML = bar(back, `${title} · marathon`) + `
+        ${tracks.length ? `<div class="mplayer" id="mp">
+          <button class="ctl" id="mprev" aria-label="Previous stop">⏮</button><button class="ctl play" id="mpp" aria-label="Play or pause narration">▶</button><button class="ctl" id="mnext" aria-label="Next stop">⏭</button>
+          <div class="mt"><div class="small muted" id="mn"></div><div class="tt" id="mtt"></div></div><div class="mtrack"><i id="mtrk"></i></div></div>` : ''}
+        <div id="mstat"></div><div id="mq"></div>`;
+      mq = document.getElementById('mq');
+      if (tracks.length) { wirePlayer(); playTrack(); }
+      next();
+      if (unsent.length) flush();
+    }
+
+    // --- narration ---
+    function drawPlayer() {
+      const n = document.getElementById('mn'), t = document.getElementById('mtt');
+      if (!n) return;
+      if (narrationDone) { n.textContent = 'Narration finished'; t.textContent = 'Tap play to hear it again'; return; }
+      n.textContent = `Stop ${ai + 1} of ${tracks.length}`; t.textContent = stops[tracks[ai]].title_en;
+    }
+    function playTrack() {
+      narrationDone = ai >= tracks.length;
+      drawPlayer(); save();
+      const trk = document.getElementById('mtrk'); if (trk) trk.style.width = '0';
+      if (narrationDone) { audio.pause(); return; }
+      const s = stops[tracks[ai]];
+      audio.src = s.audio_url;
+      const p = audio.play(); if (p && p.catch) p.catch(() => { /* blocked or interrupted: onpause shows the play button */ });
+      if ('mediaSession' in navigator && window.MediaMetadata) navigator.mediaSession.metadata = new MediaMetadata({ title: s.title_en, artist: 'STRADA', album: title });
+    }
+    function prevStop() {
+      if (!narrationDone && audio.currentTime > 3) { audio.currentTime = 0; return; }   // like a music player: first restart this stop
+      ai = Math.max(0, ai - 1); playTrack();
+    }
+    const nextStop = () => { if (!narrationDone) { ai++; playTrack(); } };
+    function wirePlayer() {
+      const pp = document.getElementById('mpp'), trk = document.getElementById('mtrk'), n = document.getElementById('mn');
+      pp.onclick = () => { if (narrationDone) { ai = 0; playTrack(); } else if (audio.paused) { const p = audio.play(); if (p && p.catch) p.catch(() => {}); } else audio.pause(); };
+      document.getElementById('mprev').onclick = prevStop;
+      document.getElementById('mnext').onclick = nextStop;
+      audio.onplay = () => pp.textContent = '❚❚';
+      audio.onplaying = () => { failures = 0; };
+      audio.onpause = () => pp.textContent = '▶';
+      audio.ontimeupdate = () => { if (audio.duration) { trk.style.width = `${100 * audio.currentTime / audio.duration}%`; n.textContent = `Stop ${ai + 1} of ${tracks.length} · ${fmt(audio.duration - audio.currentTime)} left`; } };
+      audio.onended = () => { post('/api/subtopic_progress', { subtopic_id: stops[tracks[ai]].id, lesson_done: true }); ai++; playTrack(); };
+      audio.onerror = () => {
+        if (++failures >= 3) { toast('Narration would not load. Check the connection.'); pp.textContent = '▶'; return; }
+        toast('That stop would not play, skipping it'); ai++; playTrack();
+      };
+      if ('mediaSession' in navigator) {
+        const set = (a, f) => { try { navigator.mediaSession.setActionHandler(a, f); } catch (_) { /* unsupported */ } };
+        set('play', () => audio.play()); set('pause', () => audio.pause()); set('previoustrack', prevStop); set('nexttrack', nextStop);
+      }
+    }
+
+    // --- questions ---
+    function drawStats() {
+      const left = pending().length, repeats = left - pending().filter(isNew).length, seen = total - (left - repeats);
+      document.getElementById('mstat').innerHTML = `
+        <div class="row" style="align-items:baseline"><strong>${seen} of ${total} answered</strong><span class="muted small" style="text-align:right">${left} in queue</span></div>
+        <div class="progress"><i style="width:${Math.round(100 * seen / total)}%"></i></div>
+        <div class="row" style="align-items:center"><span class="small muted">${cleared.size} cleared · ${repeats} to repeat</span><span style="text-align:right"><button class="btn small quiet" data-go="${back}">Stop for now</button></span></div>${gap(10)}`;
+    }
+    function renderQuestion() {
+      const q = current.q, st = stops[q.stop];
+      mq.innerHTML = `<div class="kind">Stop ${q.stop + 1} of ${stops.length} · ${h(st.title_en)}${current.w ? ' · repeat' : ''}</div>
+        ${q.image_url ? `<div class="figure"><img src="${h(q.image_url)}" alt=""></div>` : ''}
+        <div class="statement">${highlight(q.q_it, q.trap_words)}</div>
+        <label class="toggle"><input type="checkbox" id="hl" ${state.highlights ? 'checked' : ''}> highlight trap words</label>${gap(16)}
+        <div class="vf"><button class="btn" id="vero">Vero</button><button class="btn" id="falso">Falso</button></div>`;
+      document.getElementById('vero').onclick = () => answer(true);
+      document.getElementById('falso').onclick = () => answer(false);
+      document.getElementById('hl').onchange = e => { state.highlights = e.target.checked; localStorage.setItem('strada_hl', state.highlights ? '1' : '0'); renderQuestion(); };
+    }
+    function answer(val) {
+      const item = current, q = item.q, correct = val === q.answer;
+      current = null; answers++;
+      send(q.id, correct);
+      if (correct) {
+        item.s++;
+        if (!item.w) { firstTry++; cleared.add(q.id); }
+        else if (item.s >= 2) cleared.add(q.id);
+        else queue.push(item);
+      } else {
+        item.w = true; item.s = 0; missed.set(q.id, q);
+        queue.splice(Math.min(3, queue.length), 0, item);
+      }
+      save(); drawStats();
+      const trap = (q.trap_words || []).length ? `Trap word: <mark>${h(q.trap_words.join(', '))}</mark>${q.trap_type ? ` <span class="muted small">(${h(q.trap_type)})</span>` : ''}` : '<span class="muted">No trap word — this one is about the rule itself.</span>';
+      mq.innerHTML = `
+        ${q.image_url ? `<div class="figure"><img src="${h(q.image_url)}" alt=""></div>` : ''}
+        <div class="statement">${highlight(q.q_it, q.trap_words, true)}</div>
+        <div class="feedback ${correct ? 'ok' : 'no'}">
+          <div class="verdict">${correct ? '✓ Correct' : '✗ Wrong'} — it's ${q.answer ? 'Vero' : 'Falso'}${correct ? '' : ' (this one comes back until you get it twice)'}</div>
+          ${q.q_en ? `<p class="en">${h(q.q_en)}</p>` : ''}${q.why_en ? `<p>${h(q.why_en)}</p>` : ''}
+          <p style="margin:0">${trap}</p>
+          ${q.reform_check ? '<p class="small muted" style="margin:8px 0 0">⚠ Rule may have changed in the Dec 2024 reform — double-check this one.</p>' : ''}
+          <div id="tutorbox"></div>
+        </div>${gap(14)}
+        <div class="row">${state.health?.tutor ? `<button class="btn" id="ask">Ask tutor</button>` : ''}<button class="btn primary" id="mnx">Next</button></div>`;
+      document.getElementById('mnx').onclick = next;
+      const ask = document.getElementById('ask');
+      if (ask) ask.onclick = () => askTutor(ask, q.id, val, document.getElementById('tutorbox'));
+    }
+    function next() {
+      if (!queue.length) return finish();
+      current = queue.shift(); drawStats(); renderQuestion(); window.scrollTo(0, 0);
+    }
+    function finish() {
+      current = null; finished = true;
+      try { localStorage.removeItem(key); } catch (_) { /* ignore */ }
+      post('/api/session', { kind: 'marathon', ref_id: tid, correct: firstTry, total, passed: true, detail: { answers, missed: [...missed.keys()] } });
+      if (unsent.length) flush();
+      drawStats();
+      const list = [...missed.values()];
+      mq.innerHTML = `<div class="result"><div class="big">${Math.round(100 * firstTry / total)}%</div><p class="muted">first-try · ${total} questions · ${answers} answers</p></div>
+        ${list.length ? `<h3>Missed on first try</h3>${gap(8)}<div class="list">${missedHtml(list)}</div>` : `<div class="card"><strong>Clean run.</strong> Every question right first time.</div>`}${gap(16)}
+        <button class="btn primary" data-go="${back}">Back to topic</button>`;
+      window.scrollTo(0, 0);
+    }
+  }
+
   // ---------- router ----------
   async function route() {
     if (!state.user) return askUser();
@@ -591,6 +801,7 @@
       case 'review-stage': return reviewStage(arg);
       case 'quiz': return quiz(arg);
       case 'topic-test': return topicTest(arg);
+      case 'marathon': return marathon(arg);
       case 'repair': return repairView();
       case 'review': return reviewView();
       case 'words': return wordsView();

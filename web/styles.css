@@ -203,3 +203,14 @@ input[type=text] { width: 100%; font: inherit; padding: 12px; border-radius: 10p
 #player { position: fixed; left: 12px; right: 12px; bottom: calc(66px + env(safe-area-inset-bottom, 0px)); background: var(--ink); color: var(--bg); border-radius: 12px; padding: 10px 12px; display: flex; align-items: center; gap: 10px; z-index: 15; box-shadow: 0 6px 20px rgba(0,0,0,.25); }
 #player .t { flex: 1; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #player button { background: transparent; border: 0; color: inherit; font-size: 20px; padding: 4px 6px; }
+
+/* topic marathon: narration player pinned above the questions */
+.mplayer { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 8px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px 14px; margin-bottom: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.12); }
+.mplayer .ctl { width: 44px; height: 44px; padding: 0; border-radius: 50%; border: 1px solid var(--line); background: var(--bg); font-size: 16px; flex: none; }
+.mplayer .ctl.play { background: var(--blue); border-color: var(--blue); color: #fff; font-size: 18px; }
+.mplayer .ctl:focus-visible { outline: 3px solid var(--yellow); outline-offset: 2px; }
+.mplayer .mt { flex: 1; min-width: 0; line-height: 1.25; }
+.mplayer .mt .small { font-variant-numeric: tabular-nums; }
+.mplayer .tt { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mplayer .mtrack { position: absolute; left: 10px; right: 10px; bottom: 5px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.mplayer .mtrack i { display: block; height: 100%; width: 0; background: var(--blue); }
