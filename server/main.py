@@ -249,6 +249,61 @@ def topic(tid: str, user: str = Query(...)):
     return {"topic": t, "subtopics": subs, "mastered": tid in mastered_topics(user)}
 
 
+MARATHON_Q_OPTIONAL = ("image_url", "q_en", "trap_words", "why_en", "reform_check")
+MARATHON_STOP_OPTIONAL = ("title_it", "image_url", "narration", "audio_url")
+
+
+def stop_terms(s, term_rows):
+    """A stop's word list as lean dicts (it, en, note), in the order the words first appear in its narration."""
+    text = s.get("narration") or ""
+
+    def first_use(t):
+        i = text.find("[[" + t["it"] + "]]")
+        return i if i >= 0 else len(text)
+    out = []
+    for t in sorted(term_rows, key=first_use):
+        row = {"it": t["it"], "en": t["en"]}
+        if t.get("note"):
+            row["note"] = t["note"]
+        out.append(row)
+    return out
+
+
+@app.get("/api/topics/{tid}/marathon")
+def topic_marathon(tid: str):
+    """Everything the marathon and read screens need for one topic, in stop order: each stop's title, figure, audio,
+    narration and word list, plus every question. Built from the content cache into fresh dicts (the cached rows are
+    never touched), lean: empty fields are left out."""
+    t = content("topics")["by_id"].get(tid)
+    if not t:
+        raise HTTPException(404, "topic not found")
+    by_sub = content("questions")["by_sub"]
+    terms_by_sub = content("terms")["by_sub"]
+    stops, qs = [], []
+    for i, s in enumerate(content("subtopics")["by_topic"].get(tid, [])):
+        stop = {"id": s["id"], "ord": s["ord"], "title_en": s["title_en"]}
+        for k in MARATHON_STOP_OPTIONAL:
+            if s.get(k):
+                stop[k] = s[k]
+        words = stop_terms(s, terms_by_sub.get(s["id"], []))
+        if words:
+            stop["terms"] = words
+        stops.append(stop)
+        # the listato prints a block as its true statements then its false ones; keep stop order, because the
+        # narration follows it, but shuffle inside a stop so the answers cannot be read off the position
+        stop_qs = list(by_sub.get(s["id"], []))
+        random.shuffle(stop_qs)
+        for q in stop_qs:
+            row = {"id": q["id"], "stop": i, "q_it": q["q_it"], "answer": q["answer"]}
+            for k in MARATHON_Q_OPTIONAL:
+                if q.get(k):
+                    row[k] = q[k]
+            if q.get("trap_words") and q.get("trap_type") not in (None, "none"):
+                row["trap_type"] = q["trap_type"]
+            qs.append(row)
+    return {"topic": {"id": t["id"], "title_en": t["title_en"], "title_it": t["title_it"]}, "stops": stops, "questions": qs}
+
+
 @app.get("/api/subtopics/{sid}")
 def subtopic(sid: str, user: str = Query(...)):
     row = content("subtopics")["by_id"].get(sid)
@@ -256,7 +311,8 @@ def subtopic(sid: str, user: str = Query(...)):
         raise HTTPException(404, "sub-topic not found")
     s = dict(row)
     qs = copies(content("questions")["by_sub"].get(sid, []))
-    pm = progress_map(user, [q["id"] for q in qs])
+    random.shuffle(qs)                       # stored order is every Vero then every Falso; the sort below is
+    pm = progress_map(user, [q["id"] for q in qs])   # stable, so this is what breaks ties for unseen questions
     for q in qs:
         p = pm.get(q["id"])
         q["box"] = p["box"] if p else 0
