@@ -110,6 +110,14 @@ def content(table):
     return hit
 
 
+def day_shuffle(items, *key):
+    """Shuffle, but the same way all day for the same key. The app serves a screen from its cache and
+    re-renders when the fresh answer differs, so a per-request order made the Read screen redraw forever.
+    The learner still cannot read the answer off the position, and tomorrow's order is different."""
+    random.Random("|".join(map(str, key)) + now().strftime("|%Y-%m-%d")).shuffle(items)
+    return items
+
+
 def copies(rows):
     return [dict(r) for r in rows]
 
@@ -291,8 +299,7 @@ def topic_marathon(tid: str):
         stops.append(stop)
         # the listato prints a block as its true statements then its false ones; keep stop order, because the
         # narration follows it, but shuffle inside a stop so the answers cannot be read off the position
-        stop_qs = list(by_sub.get(s["id"], []))
-        random.shuffle(stop_qs)
+        stop_qs = day_shuffle(list(by_sub.get(s["id"], [])), "marathon", s["id"])
         for q in stop_qs:
             row = {"id": q["id"], "stop": i, "q_it": q["q_it"], "answer": q["answer"]}
             for k in MARATHON_Q_OPTIONAL:
@@ -311,7 +318,7 @@ def subtopic(sid: str, user: str = Query(...)):
         raise HTTPException(404, "sub-topic not found")
     s = dict(row)
     qs = copies(content("questions")["by_sub"].get(sid, []))
-    random.shuffle(qs)                       # stored order is every Vero then every Falso; the sort below is
+    day_shuffle(qs, "quiz", sid, user)       # stored order is every Vero then every Falso; the sort below is
     pm = progress_map(user, [q["id"] for q in qs])   # stable, so this is what breaks ties for unseen questions
     for q in qs:
         p = pm.get(q["id"])

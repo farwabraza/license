@@ -878,9 +878,16 @@
     // A screen is painted from the cache first; when the server's answer turns out to differ, redraw —
     // but only where redrawing costs nothing. A quiz, exam or review in progress keeps its state.
     const REDRAWABLE = ['', 'topic', 'stats', 'read'];
+    const redrawn = {};
     navigator.serviceWorker.addEventListener('message', e => {
       if (e.data?.type !== 'api-updated') return;
-      if (REDRAWABLE.includes(location.hash.replace(/^#\/?/, '').split('/')[0])) route();
+      if (!REDRAWABLE.includes(location.hash.replace(/^#\/?/, '').split('/')[0])) return;
+      // redraw at most once a minute per screen: a response that differs every time it is fetched would
+      // otherwise redraw, refetch, differ again, and the page would never settle under the reader's finger
+      const now = Date.now();
+      if (now - (redrawn[location.hash] || 0) < 60000) return;
+      redrawn[location.hash] = now;
+      route();
     });
   }
 })();
