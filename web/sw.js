@@ -1,6 +1,6 @@
 /* STRADA service worker: app shell offline, media cached after first play,
    API stale-while-revalidate so a screen you have seen before paints at once. */
-const VERSION = 'strada-v4';
+const VERSION = 'strada-v5';
 const SHELL = ['/', '/index.html', '/app.js', '/styles.css', '/manifest.json', '/icon.svg'];
 
 self.addEventListener('install', e => {
