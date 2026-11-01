@@ -249,6 +249,31 @@ def topic(tid: str, user: str = Query(...)):
     return {"topic": t, "subtopics": subs, "mastered": tid in mastered_topics(user)}
 
 
+MARATHON_Q_OPTIONAL = ("image_url", "q_en", "trap_words", "why_en", "reform_check")
+
+
+@app.get("/api/topics/{tid}/marathon")
+def topic_marathon(tid: str):
+    """Everything the marathon screen needs for one topic, in stop order: each stop's audio and every question.
+    Built from the content cache into fresh dicts (the cached rows are never touched), lean: empty fields are left out."""
+    t = content("topics")["by_id"].get(tid)
+    if not t:
+        raise HTTPException(404, "topic not found")
+    by_sub = content("questions")["by_sub"]
+    stops, qs = [], []
+    for i, s in enumerate(content("subtopics")["by_topic"].get(tid, [])):
+        stops.append({"id": s["id"], "ord": s["ord"], "title_en": s["title_en"], "audio_url": s.get("audio_url")})
+        for q in by_sub.get(s["id"], []):
+            row = {"id": q["id"], "stop": i, "q_it": q["q_it"], "answer": q["answer"]}
+            for k in MARATHON_Q_OPTIONAL:
+                if q.get(k):
+                    row[k] = q[k]
+            if q.get("trap_words") and q.get("trap_type") not in (None, "none"):
+                row["trap_type"] = q["trap_type"]
+            qs.append(row)
+    return {"topic": {"id": t["id"], "title_en": t["title_en"], "title_it": t["title_it"]}, "stops": stops, "questions": qs}
+
+
 @app.get("/api/subtopics/{sid}")
 def subtopic(sid: str, user: str = Query(...)):
     row = content("subtopics")["by_id"].get(sid)
