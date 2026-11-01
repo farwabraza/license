@@ -58,6 +58,11 @@
   const narrationHtml = n => h(n).replace(/\[\[(.+?)\]\]/g, (_, t) => `<button class="term" data-say="${h(t)}">${h(t)}</button>`);
 
   function setTab(name) { tabs.querySelectorAll('a').forEach(a => a.classList.toggle('on', a.dataset.tab === name)); }
+  // the bar is fixed over the page; publish its height so nothing ends up hidden behind it
+  const measureTabs = () => document.documentElement.style.setProperty('--tabs-h', `${tabs.offsetHeight}px`);
+  measureTabs();
+  window.addEventListener('resize', measureTabs);
+  window.addEventListener('orientationchange', () => setTimeout(measureTabs, 300));
   const bar = (back, crumb) => `<div class="bar"><button class="back" data-go="${h(back)}">‹ Back</button><span class="crumb">${h(crumb || '')}</span></div>`;
   const errorCard = (e, retry) => `<div class="card"><h3>Couldn't load</h3><p class="muted">${h(e.message)}</p><button class="btn" data-go="${h(retry)}">Try again</button></div>`;
   function stepper(stage, passed) {
@@ -167,12 +172,14 @@
     box.querySelector('#nx').onclick = () => { i++; play(); };
     box.querySelector('#cl').onclick = stopPlaylist;
     state.playlist = { audio, box };
+    document.body.classList.add('has-player');
     play();
   }
   function stopPlaylist() {
     if (!state.playlist) return;
     state.playlist.audio.pause(); state.playlist.audio.src = '';
     state.playlist.box.remove(); state.playlist = null;
+    document.body.classList.remove('has-player');
   }
 
   async function loadSub(sid, fresh) {
