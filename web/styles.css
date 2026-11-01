@@ -41,7 +41,12 @@ p { margin: 0 0 0.75em; }
 .muted { color: var(--muted); }
 .small { font-size: 14px; }
 
-#app { max-width: 640px; margin: 0 auto; padding: 14px 16px 90px; min-height: 100vh; }
+/* The tab bar is fixed on top of the page, so keep its real height clear at the bottom — app.js
+   measures it into --tabs-h, because it grows with the font size and the phone's safe-area inset.
+   dvh, where supported, tracks iOS hiding and showing its own toolbars. */
+#app { max-width: 640px; margin: 0 auto; padding: 14px 16px calc(var(--tabs-h, 78px) + 20px); min-height: 100vh; }
+@supports (height: 100dvh) { #app { min-height: 100dvh; } }
+body.has-player #app { padding-bottom: calc(var(--tabs-h, 78px) + 88px); }   /* playlist player sits above the bar */
 
 /* top bar */
 .bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
