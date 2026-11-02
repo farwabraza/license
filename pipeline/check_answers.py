@@ -11,6 +11,7 @@ reform_check can legitimately differ from the 2023 bank. Everything else that di
 Needs SUPABASE_URL and SUPABASE_SERVICE_KEY in .env (the same as 04_upload.py). Reads only; changes nothing.
 Run:  python pipeline/check_answers.py              # every topic
       python pipeline/check_answers.py --topic t05  # one topic, every disagreement listed
+      python pipeline/check_answers.py --local      # check data/bank.json (step 01's output) instead of the database
 """
 import re
 import sys
@@ -19,7 +20,7 @@ import unicodedata
 import httpx
 from supabase import create_client
 
-from common import SOURCE_REPO, env
+from common import BANK, SOURCE_REPO, env, load_json
 
 
 def norm(t: str) -> str:
@@ -54,11 +55,17 @@ def bank_2023():
 
 def main():
     only = sys.argv[sys.argv.index("--topic") + 1] if "--topic" in sys.argv else None
-    sb = create_client(env("SUPABASE_URL"), env("SUPABASE_SERVICE_KEY"))
-    topics = {t["id"]: t for t in fetch_all(sb, "topics", "id,ord,title_en")}
-    stops = {s["id"]: s for s in fetch_all(sb, "subtopics", "id,ord,title_en")}
-    qs = [q for q in fetch_all(sb, "questions", "id,topic_id,subtopic_id,q_it,answer,reform_check")
-          if not only or q["topic_id"] == only]
+    if "--local" in sys.argv:
+        bank = load_json(BANK)
+        all_t, all_s, all_q = bank["topics"], bank["subtopics"], bank["questions"]
+    else:
+        sb = create_client(env("SUPABASE_URL"), env("SUPABASE_SERVICE_KEY"))
+        all_t = fetch_all(sb, "topics", "id,ord,title_en")
+        all_s = fetch_all(sb, "subtopics", "id,ord,title_en")
+        all_q = fetch_all(sb, "questions", "id,topic_id,subtopic_id,q_it,answer,reform_check")
+    topics = {t["id"]: t for t in all_t}
+    stops = {s["id"]: s for s in all_s}
+    qs = [q for q in all_q if not only or q["topic_id"] == only]
     if not qs:
         sys.exit(f"No questions found{f' for topic {only}' if only else ''}.")
     ref = bank_2023()
