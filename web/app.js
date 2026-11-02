@@ -85,7 +85,8 @@
     setTimeout(() => t.remove(), 2200);
   }
   const missedHtml = list => list.map(q => `<div class="item"><div>${highlight(q.q_it, q.trap_words, true)} <span class="muted small">→ ${q.answer ? 'Vero' : 'Falso'}</span></div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}${q.why_en ? `<div class="small">${h(q.why_en)}</div>` : ''}</div>`).join('');
-  const isLocked = (ord, prevPassed) => !state.unlockAll && ord > 1 && !prevPassed;
+  // a stop opens when the one before it is passed, or once it has been quizzed itself (a stop quiz or a whole-topic run)
+  const isLocked = (ord, prevPassed, tried) => !state.unlockAll && ord > 1 && !prevPassed && !tried;
 
   app.addEventListener('click', e => {
     const lock = e.target.closest('[data-locked]');
@@ -148,11 +149,11 @@
     const nextId = (subs.find(s => !s.quiz_passed) || {}).id;
     const withAudio = subs.filter(s => s.audio_url).length;
     const topicQs = subs.reduce((a, s) => a + s.question_count, 0);
-    const lockedAt = i => isLocked(subs[i].ord, i > 0 && subs[i - 1].quiz_passed);
+    const lockedAt = i => isLocked(subs[i].ord, i > 0 && subs[i - 1].quiz_passed, subs[i].attempts > 0);
     const weak = subs.map((s, i) => [s, i]).filter(([s]) => stats.get(s.id)?.weak);
     app.innerHTML = bar('#/', d.topic.title_it) + `
       <h1>${h(d.topic.title_en)}${d.mastered ? '<span class="badge green">mastered</span>' : ''}</h1>
-      <p class="muted">${subs.filter(s => s.quiz_passed).length} of ${subs.length} stops passed. Stops unlock in order as you pass each quiz.</p>
+      <p class="muted">${subs.filter(s => s.quiz_passed).length} of ${subs.length} stops passed. Stops unlock in order as you pass each quiz, or all at once when you finish the topic questions.</p>
       <div class="stack">
         <button class="btn primary" data-go="#/read/${tid}">Topic lesson · ${subs.length} stops${withAudio ? ' with audio' : ''}</button>
         ${topicQs ? `<button class="btn quiet" data-go="#/marathon/${tid}">Skip to the topic questions · ${topicQs}</button>` : ''}
@@ -191,7 +192,7 @@
     let d;
     try { d = await loadSub(sid, true); } catch (e) { app.innerHTML = errorCard(e, `#/lesson/${sid}`); return; }
     const s = d.subtopic, p = d.progress || {};
-    if (isLocked(s.ord, d.prev_passed)) { app.innerHTML = lockedCard(d); return; }
+    if (isLocked(s.ord, d.prev_passed, d.progress?.attempts > 0)) { app.innerHTML = lockedCard(d); return; }
     const terms = termsHtml(d.terms);
     app.innerHTML = bar(`#/topic/${s.topic_id}`, d.topic.title_en) + stepper('teach', p.quiz_passed) + `
       <h1>${h(s.title_en)}${p.quiz_passed ? `<span class="badge green">passed · ${p.best_accuracy}%</span>` : ''}</h1>
@@ -367,7 +368,7 @@
     let d;
     try { d = await loadSub(sid, true); } catch (e) { app.innerHTML = errorCard(e, `#/quiz/${sid}`); return; }
     const s = d.subtopic;
-    if (isLocked(s.ord, d.prev_passed)) { app.innerHTML = lockedCard(d); return; }
+    if (isLocked(s.ord, d.prev_passed, d.progress?.attempts > 0)) { app.innerHTML = lockedCard(d); return; }
     const questions = shuffled ? shuffle(d.questions) : d.questions;
     runDrill({
       questions, back: `#/lesson/${sid}`, crumb: s.title_en, stage: 'quiz',
@@ -819,10 +820,21 @@
       current = null; finished = true;
       try { localStorage.removeItem(key); } catch (_) { /* ignore */ }
       post('/api/session', { kind: 'marathon', ref_id: tid, correct: firstTry, total, passed: true, detail: { answers, missed: [...missed.keys()] } });
+      // score every stop on its own first-try answers, as if its quiz had been taken: this opens every stop and gives each its best %
+      const perStop = stops.map((st, i) => {
+        const mine = questions.filter(q => q.stop === i);
+        return { st, subtopic_id: st.id, total: mine.length, correct: mine.filter(q => !missed.has(q.id)).length };
+      }).filter(x => x.total);
+      post(`/api/topics/${tid}/stop_results`, { stops: perStop.map(({ subtopic_id, total, correct }) => ({ subtopic_id, total, correct })) });
+      const passPct = state.health?.stop_pass_pct ?? 90;
+      const stopRows = perStop.map(x => { const pct = Math.round(100 * x.correct / x.total), ok = pct >= passPct;
+        return `<button class="node ${ok ? 'done' : 'started'}" data-go="#/lesson/${x.subtopic_id}"><span class="dot">${ok ? '✓' : x.st.ord}</span>
+          <div class="title">${h(x.st.title_en)}</div><div class="sub" style="color:${ok ? 'var(--green)' : 'var(--red)'}">${pct}% first-try · ${x.total - x.correct} wrong of ${x.total}${ok ? ' · passed' : ` · need ${passPct}%`}</div></button>`; }).join('');
       if (unsent.length) flush();
       drawStats();
       const list = [...missed.values()];
       mq.innerHTML = `<div class="result"><div class="big">${Math.round(100 * firstTry / total)}%</div><p class="muted">first-try · ${total} questions · ${answers} answers</p></div>
+        <h3>By stop</h3>${gap(8)}<div class="road">${stopRows}</div>${gap(16)}
         ${list.length ? `<h3>Missed on first try</h3>${gap(8)}<div class="list">${missedHtml(list)}</div>` : `<div class="card"><strong>Clean run.</strong> Every question right first time.</div>`}${gap(16)}
         <button class="btn primary" data-go="${back}">Back to topic</button>`;
       window.scrollTo(0, 0);

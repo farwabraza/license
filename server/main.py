@@ -229,6 +229,17 @@ class SubtopicProgress(BaseModel):
     quiz_result: Optional[QuizResult] = None
 
 
+class StopResult(BaseModel):
+    subtopic_id: str
+    correct: int
+    total: int
+
+
+class StopResults(BaseModel):
+    user: str
+    stops: list[StopResult]
+
+
 class Session(BaseModel):
     user: str
     kind: str
@@ -511,23 +522,58 @@ def answers(b: Answers):
     return {"ok": True, "n": len(b.answers)}
 
 
+def blank_stop_progress(user, sid):
+    return {"user_id": user, "subtopic_id": sid, "lesson_done": False, "review_done": False,
+            "quiz_passed": False, "best_accuracy": None, "attempts": 0}
+
+
+def record_quiz(r, correct, total):
+    """Count one quiz attempt on a stop's progress row r (first-try correct out of total); returns whether it passed."""
+    acc = round(100 * correct / max(1, total))
+    r["attempts"] = (r.get("attempts") or 0) + 1
+    r["best_accuracy"] = max(acc, r.get("best_accuracy") or 0)
+    passed = acc >= STOP_PASS_PCT
+    r["quiz_passed"] = bool(r.get("quiz_passed")) or passed
+    r["lesson_done"] = True
+    return passed
+
+
+@app.post("/api/topics/{tid}/stop_results")
+def topic_stop_results(tid: str, b: StopResults):
+    """A finished topic run, scored per stop: each stop gets a quiz attempt from its own first-try score, exactly as
+    if its quiz had been taken on its own (best accuracy, attempts, passed at STOP_PASS_PCT). A stop with an attempt
+    is open from then on whatever its neighbours scored (isLocked in web/app.js), so a whole-topic run opens every stop."""
+    mine = {s["id"] for s in content("subtopics")["by_topic"].get(tid, [])}
+    if not mine:
+        raise HTTPException(404, "topic not found")
+    results = [x for x in b.stops if x.subtopic_id in mine and x.total > 0]
+    if not results:
+        return {"stops": []}
+    have = {r["subtopic_id"]: r for r in sb.table("subtopic_progress").select("*").eq("user_id", b.user)
+            .in_("subtopic_id", [x.subtopic_id for x in results]).execute().data}
+    rows, out = [], []
+    for x in results:
+        r = have.get(x.subtopic_id) or blank_stop_progress(b.user, x.subtopic_id)
+        passed = record_quiz(r, x.correct, x.total)
+        r["updated_at"] = iso(now())
+        rows.append(r)
+        out.append({"subtopic_id": x.subtopic_id, "accuracy": round(100 * x.correct / x.total), "passed_now": passed,
+                    "quiz_passed": r["quiz_passed"]})
+    sb.table("subtopic_progress").upsert(rows).execute()
+    return {"stops": out, "pass_pct": STOP_PASS_PCT}
+
+
 @app.post("/api/subtopic_progress")
 def subtopic_progress(sp: SubtopicProgress):
     rows = sb.table("subtopic_progress").select("*").eq("user_id", sp.user).eq("subtopic_id", sp.subtopic_id).execute().data
-    r = rows[0] if rows else {"user_id": sp.user, "subtopic_id": sp.subtopic_id, "lesson_done": False,
-                              "review_done": False, "quiz_passed": False, "best_accuracy": None, "attempts": 0}
+    r = rows[0] if rows else blank_stop_progress(sp.user, sp.subtopic_id)
     if sp.lesson_done is not None:
         r["lesson_done"] = sp.lesson_done
     if sp.review_done is not None:
         r["review_done"] = sp.review_done
     passed_now = None
     if sp.quiz_result:
-        acc = round(100 * sp.quiz_result.correct / max(1, sp.quiz_result.total))
-        r["attempts"] += 1
-        r["best_accuracy"] = max(acc, r["best_accuracy"] or 0)
-        passed_now = acc >= STOP_PASS_PCT
-        r["quiz_passed"] = r["quiz_passed"] or passed_now
-        r["lesson_done"] = True
+        passed_now = record_quiz(r, sp.quiz_result.correct, sp.quiz_result.total)
         sb.table("sessions").insert({"user_id": sp.user, "kind": "quiz", "ref_id": sp.subtopic_id, "finished_at": iso(now()),
                                      "correct": sp.quiz_result.correct, "total": sp.quiz_result.total, "passed": passed_now}).execute()
     r["updated_at"] = iso(now())
