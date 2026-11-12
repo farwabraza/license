@@ -16,6 +16,13 @@
   const el = html => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
   const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
   const shuffle = a => { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+  // a picture that fails to load (a dropped connection, a busy server) gets one more try a moment later
+  document.addEventListener('error', e => {
+    const img = e.target;
+    if (!(img instanceof HTMLImageElement) || img.dataset.retried) return;
+    img.dataset.retried = '1';
+    setTimeout(() => { img.src = img.src + (img.src.includes('?') ? '&' : '?') + 'retry=1'; }, 1500);
+  }, true);
   const gap = px => `<div style="height:${px}px"></div>`;
 
   async function api(path, body) {
@@ -84,7 +91,7 @@
     document.body.appendChild(t);
     setTimeout(() => t.remove(), 2200);
   }
-  const missedHtml = list => list.map(q => `<div class="item"><div>${highlight(q.q_it, q.trap_words, true)} <span class="muted small">→ ${q.answer ? 'Vero' : 'Falso'}</span></div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}${q.why_en ? `<div class="small">${h(q.why_en)}</div>` : ''}</div>`).join('');
+  const missedHtml = list => list.map(q => `<div class="item">${q.image_url ? `<img class="thumb" src="${h(q.image_url)}" alt="" loading="lazy">` : ''}<div>${highlight(q.q_it, q.trap_words, true)} <span class="muted small">→ ${q.answer ? 'Vero' : 'Falso'}</span></div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}${q.why_en ? `<div class="small">${h(q.why_en)}</div>` : ''}</div>`).join('');
   // a stop opens when the one before it is passed, or once it has been quizzed itself (a stop quiz or a whole-topic run)
   const isLocked = (ord, prevPassed, tried) => !state.unlockAll && ord > 1 && !prevPassed && !tried;
 
@@ -127,6 +134,7 @@
     app.innerHTML = `
       <div class="bar"><h1>The road</h1><span class="crumb">${h(state.user)}</span></div>
       <p class="muted">${done} of ${total} stops passed · ${ts.filter(t => t.mastered).length} of ${ts.length} topics mastered.</p>
+      <div class="row"><button class="btn primary" data-go="#/crash">⚡ Crash course${daysLeft() >= 0 ? ` · ${daysLeft()} days` : ''}</button><button class="btn" data-go="#/trucchi">🎯 Trucchi</button></div>${gap(10)}
       <button class="btn" data-go="#/repair">Repair test · 10 questions from your weakest topics</button>${gap(16)}
       <div class="road">${ts.map(t => {
         const cls = t.passed === t.subtopics ? 'done' : t.passed || t.lesson_done ? 'started' : '';
@@ -842,6 +850,119 @@
   }
 
   // ---------- router ----------
+  // ---------- crash course: a plan to the exam date, then a sprint per topic ----------
+  const EXAM_KEY = 'strada_exam_date';
+  const examDate = () => { try { return localStorage.getItem(EXAM_KEY) || '2026-11-17'; } catch (_) { return '2026-11-17'; } };
+  const daysLeft = () => { const d = new Date(examDate() + 'T00:00:00'), t = new Date(); t.setHours(0, 0, 0, 0); return Math.round((d - t) / 864e5); };
+
+  async function crashView() {
+    setTab('home');
+    app.innerHTML = bar('#/', 'Crash course') + `<div class="empty">Loading…</div>`;
+    let d; try { d = await api('/api/crash'); } catch (e) { app.innerHTML = errorCard(e, '#/crash'); return; }
+    if (location.hash !== '#/crash') return;
+    const ts = d.topics, days = daysLeft(), studyDays = Math.max(1, days);     // the exam morning itself is not a study day
+    const cov = t => t.questions ? t.seen / t.questions : 1;
+    const todo = ts.filter(t => !t.sprints && cov(t) < 0.6).sort((a, b) => cov(a) - cov(b) || a.ord - b.ord);   // topics already mostly answered need no first sprint
+    const perDay = Math.ceil(todo.length / studyDays);
+    const today = todo.slice(0, perDay);
+    const fixes = ts.filter(t => t.to_fix).sort((a, b) => b.to_fix - a.to_fix).slice(0, 3);
+    const row = t => `<div class="node crash ${t.sprints ? 'done' : ''}">
+        <span class="dot">${t.sprints ? '✓' : t.ord}</span>
+        <div class="title">${h(t.title_en)}</div>
+        <div class="sub">${h(t.title_it)} · seen ${t.seen} of ${t.questions}${t.accuracy != null ? ` · ${t.accuracy}% right` : ''}${t.to_fix ? ` · <b style="color:var(--red)">${t.to_fix} to fix</b>` : ''}${t.sprints ? ` · ${t.sprints} sprint${t.sprints > 1 ? 's' : ''}, last ${t.last_sprint_pct}%` : ''}</div>
+        <div class="meter"><i style="width:${Math.round(100 * cov(t))}%"></i></div>
+        <div class="row" style="margin-top:10px"><button class="btn small primary" data-go="#/sprint/${t.id}">Sprint · ${Math.min(d.sprint_size, t.questions)}</button><button class="btn small quiet" data-go="#/read/${t.id}">Lesson</button></div>
+      </div>`;
+    const when = days > 1 ? `${days} days to go` : days === 1 ? 'Exam tomorrow' : days === 0 ? 'Exam day' : 'Exam date passed';
+    app.innerHTML = bar('#/', 'Crash course') + `
+      <h1>Crash course</h1>
+      <div class="card"><div class="row" style="align-items:center"><strong style="font-size:20px">${when}</strong>
+        <label class="small muted" style="text-align:right">Exam <input type="date" id="exd" value="${h(examDate())}"></label></div>
+        <p class="small muted" style="margin:8px 0 0">A sprint is ${d.sprint_size} questions from one topic: your unfixed mistakes first, then questions you have never seen, one per stop in turn, so each sprint sweeps the whole topic. Every answer shows the English and why. Wrong ones come back until you get them twice.</p></div>${gap(12)}
+      <div class="card"><h3 style="margin-top:0">Today</h3>
+        ${today.length ? `<p class="small muted" style="margin-top:0">${todo.length} topic${todo.length > 1 ? 's' : ''} you have barely seen, over ${studyDays} day${studyDays > 1 ? 's' : ''}: ${perDay} a day. A topic drops off once it has had a sprint or you have answered 60% of it.</p>` : '<p class="small muted" style="margin-top:0">Every topic has had a sprint or is mostly done. Now fix mistakes and run exams.</p>'}
+        <ol class="plan">
+          ${today.map(t => `<li><a href="#/sprint/${t.id}">Sprint: ${h(t.title_en)}</a></li>`).join('')}
+          ${fixes.length ? `<li>Fix mistakes: ${fixes.map(t => `<a href="#/sprint/${t.id}">${h(t.title_en)} (${t.to_fix})</a>`).join(', ')}</li>` : ''}
+          <li><a href="#/review">Review what's due</a></li>
+          <li><a href="#/exam">One exam simulation</a>: 30 questions, 20 minutes, max 3 errors</li>
+          <li><a href="#/trucchi">Trucchi</a>: 5 minutes on the tricks, for when you don't know</li>
+        </ol></div>${gap(16)}
+      <h3>All topics</h3><p class="small muted">Least seen first. The bar is how much of the topic you have answered at least once.</p>
+      <div class="road">${[...ts].sort((a, b) => cov(a) - cov(b) || a.ord - b.ord).map(row).join('')}</div>`;
+    document.getElementById('exd').onchange = e => { try { localStorage.setItem(EXAM_KEY, e.target.value); } catch (_) { /* ignore */ } crashView(); };
+  }
+
+  async function sprintView(tid) {
+    setTab('home');
+    app.innerHTML = bar('#/crash', 'Sprint') + `<div class="empty">Loading…</div>`;
+    let d; try { d = await api(`/api/crash/${tid}`); } catch (e) { app.innerHTML = errorCard(e, `#/sprint/${tid}`); return; }
+    if (location.hash !== `#/sprint/${tid}`) return;
+    if (!d.questions.length) { app.innerHTML = bar('#/crash', 'Sprint') + `<div class="empty">No questions in this topic.</div>`; return; }
+    const title = d.topic.title_en;
+    runDrill({
+      questions: d.questions, back: '#/crash', crumb: `Sprint · ${title}`,
+      onFinish: res => {
+        post('/api/session', { kind: 'crash', ref_id: tid, correct: res.correct, total: res.total, passed: res.pct >= 90, detail: { missed: res.missed.map(q => q.id) } });
+        app.innerHTML = bar('#/crash', `Sprint · ${title}`) + `
+          <div class="result"><div class="big" style="color:${res.pct >= 90 ? 'var(--green)' : res.pct >= 75 ? 'var(--ink)' : 'var(--red)'}">${res.pct}%</div><p class="muted">first-try · ${res.total} questions${d.fixes ? ` · ${d.fixes} were old mistakes` : ''}</p></div>
+          ${res.missed.length ? `<h3>Missed on first try</h3><p class="small muted">They come back first in your next sprint on this topic.</p>${gap(4)}<div class="list">${missedHtml(res.missed)}</div>` : '<div class="card"><strong>Clean sprint.</strong></div>'}${gap(16)}
+          <div class="stack"><button class="btn primary" data-go="#/crash">Back to the plan</button>
+          <button class="btn" id="again">Another sprint on ${h(title)}</button></div>`;
+        document.getElementById('again').onclick = () => sprintView(tid);
+      },
+    });
+  }
+
+  // ---------- trucchi: the word tricks, with their real hit rate on the official bank ----------
+  async function trucchiView() {
+    setTab('home');
+    app.innerHTML = bar('#/', 'Trucchi') + `<div class="empty">Loading…</div>`;
+    let d; try { d = await api('/api/trucchi'); } catch (e) { app.innerHTML = errorCard(e, '#/trucchi'); return; }
+    if (location.hash !== '#/trucchi') return;
+    const rule = r => {
+      const pf = r.pct_false, leanF = pf >= 50, sure = Math.max(pf, 100 - pf);
+      return `<div class="card trucco">
+        <div class="row" style="align-items:baseline"><div><span class="tword">${h(r.it)}</span> <span class="muted">${h(r.en)}</span></div>
+          <span class="badge ${sure >= 75 ? (leanF ? 'red' : 'green') : 'blue'}">${sure >= 75 ? `${sure}% ${leanF ? 'Falso' : 'Vero'}` : 'coin flip'}</span></div>
+        <div class="tbar" title="${100 - pf}% Vero, ${pf}% Falso"><i class="v" style="width:${100 - pf}%"></i><i class="f" style="width:${pf}%"></i></div>
+        <div class="small muted">${r.n} statements · ${r.n - r.false} Vero · ${r.false} Falso</div>
+        <p style="margin:8px 0">${h(r.tip)}</p>
+        ${r.examples.length && sure >= 75 ? `<details><summary class="small"><b>${r.exceptions} exception${r.exceptions > 1 ? 's' : ''} to learn</b>: ${leanF ? 'true' : 'false'} despite the word</summary>
+          <div class="list" style="margin-top:8px">${r.examples.map(q => `<div class="item"><div>${h(q.q_it)} <span class="small ${q.answer ? 'ok' : 'no'}">→ ${q.answer ? 'Vero' : 'Falso'}</span></div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}</div>`).join('')}</div></details>` : ''}
+        <button class="btn small" data-go="#/trucco/${r.id}" style="margin-top:8px">Drill ${Math.min(r.n, 30)}${r.exceptions && sure >= 75 ? ' · exceptions first' : ''}</button>
+      </div>`;
+    };
+    app.innerHTML = bar('#/', 'Trucchi') + `
+      <h1>Trucchi</h1>
+      <div class="card"><p style="margin-top:0">Words that tip a statement towards Vero or Falso. Every percentage is counted on all ${d.total.toLocaleString()} official statements, so you can see how far each trick really goes.</p>
+        <p class="small muted" style="margin:0">Use them only when you don't know the rule: they are odds, not answers. The drill on each one puts the <b>exceptions</b> first. Those are the questions built to catch people who rely on the trick.</p></div>${gap(16)}
+      ${d.groups.map(g => { const rs = d.rules.filter(r => r.group === g.id); return rs.length ? `<h2>${h(g.title)} <span class="badge ${g.id === 'soft' ? 'green' : g.id === 'myth' ? 'blue' : 'red'}">${h(g.verdict)}</span></h2><div class="stack">${rs.map(rule).join('')}</div>${gap(16)}` : ''; }).join('')}
+      <h2>How to use them</h2>
+      <div class="card stack">
+        <div><b>Swap the absolute for the soft word.</b> "Il limite di velocità nei centri abitati è <u>sempre</u> di 50 km/h" is <b>Falso</b> (some urban roads allow 70). The same sentence with <u>ordinariamente</u> is <b>Vero</b>.</div>
+        <div><b>A phrase to remember.</b> "<i>adesivo da apporre obbligatoriamente sulla spazzatura</i>": all four words appear only in false statements in the current bank (16 statements, 16 Falso).</div>
+        <div><b>Sudden actions vs avoiding them.</b> "Frenare <u>energicamente</u>", "sterzare <u>rapidamente</u>": almost always Falso. "<u>Evitare</u> manovre brusche": always Vero.</div>
+        <div><b>Read every word.</b> One "solo", "anche" or "non" flips a statement. If a sentence sounds right but has an absolute in it, read it again looking for the exception.</div>
+      </div>`;
+  }
+
+  async function truccoDrill(rid) {
+    setTab('home');
+    app.innerHTML = bar('#/trucchi', 'Trucchi drill') + `<div class="empty">Loading…</div>`;
+    let d; try { d = await api(`/api/trucchi/${rid}/drill`); } catch (e) { app.innerHTML = errorCard(e, `#/trucco/${rid}`); return; }
+    if (location.hash !== `#/trucco/${rid}`) return;
+    runDrill({
+      questions: d.questions, back: '#/trucchi', crumb: 'Trucchi drill',
+      onFinish: res => {
+        app.innerHTML = bar('#/trucchi', 'Trucchi drill') + `<div class="result"><div class="big">${res.pct}%</div><p class="muted">first-try · ${res.total} questions · ${d.exceptions} exceptions in this set</p></div>
+          ${res.missed.length ? `<h3>Missed</h3>${gap(8)}<div class="list">${missedHtml(res.missed)}</div>` : ''}${gap(16)}
+          <div class="stack"><button class="btn primary" data-go="#/trucchi">Back to trucchi</button><button class="btn" id="again">Another round</button></div>`;
+        document.getElementById('again').onclick = () => truccoDrill(rid);
+      },
+    });
+  }
+
   async function route() {
     if (!state.user) return askUser();
     if (!state.health) { try { state.health = await fetch('/api/health').then(r => r.json()); } catch (_) { state.health = {}; } }
@@ -863,6 +984,10 @@
       case 'words': return wordsView();
       case 'exam': return examView();
       case 'stats': return statsView();
+      case 'crash': return crashView();
+      case 'sprint': return sprintView(arg);
+      case 'trucchi': return trucchiView();
+      case 'trucco': return truccoDrill(arg);
       default: location.hash = '#/';
     }
   }

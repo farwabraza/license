@@ -1,6 +1,6 @@
 /* STRADA service worker: app shell offline, media cached after first play,
    API stale-while-revalidate so a screen you have seen before paints at once. */
-const VERSION = 'strada-v9';
+const VERSION = 'strada-v10';   // v10: drops caches that may hold a failed picture
 const SHELL = ['/', '/index.html', '/app.js', '/styles.css', '/manifest.json', '/icon.svg'];
 
 self.addEventListener('install', e => {
@@ -41,9 +41,14 @@ self.addEventListener('fetch', e => {
   // 206 at all, so answering one from cache hands Safari a whole 200 body for a range it asked for and
   // playback silently never starts. Leave range requests to the browser.
   if (req.headers.has('range')) return;
-  // other media from Supabase storage and Google Fonts: cache-first
-  e.respondWith(caches.match(req).then(hit => hit || fetch(req).then(r => {
-    if (r.status === 200 || r.type === 'opaque') { const copy = r.clone(); caches.open(VERSION).then(c => c.put(req, copy)); }
-    return r;
-  })));
+  // other media from Supabase storage and Google Fonts: cache-first, but only a response known to be good is kept.
+  // An <img> asks cross-site in no-cors mode, whose answer is opaque: its status is hidden, so a 400/429/5xx looked
+  // like success, went into the cache and that picture never loaded again. Ask with CORS instead (Supabase storage
+  // and Google Fonts allow it), which shows the status; if that is refused, fall back to the plain request uncached.
+  e.respondWith(caches.match(req).then(hit => hit || fetch(req.url, { mode: 'cors', credentials: 'omit' })
+    .catch(() => null)
+    .then(r => {
+      if (r && r.ok) { const copy = r.clone(); caches.open(VERSION).then(c => c.put(req, copy)); return r; }
+      return r && r.status ? r : fetch(req);
+    })));
 });
