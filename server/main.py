@@ -771,6 +771,170 @@ def tutor(t: TutorAsk):
     return {"answer_en": text, "cached": False}
 
 
+# ---------- trucchi: word patterns that tip the answer, measured on the real bank ----------
+
+# (id, group, Italian pattern shown, English, regex on the lower-cased statement, tip). The counts are not written
+# here: they are measured on the questions table every time the content cache refreshes, so they always match the bank.
+TRUCCHI = [
+    ("mai", "absolute", "mai", "never", r"\bmai\b", "Almost every 'mai' statement is false: the code rarely forbids something in every case."),
+    ("in-ogni-caso", "absolute", "in ogni caso", "in any case", r"\bin ogni caso\b", "\"In ogni caso\" claims a rule with no exceptions. That is nearly always the lie."),
+    ("sempre", "absolute", "sempre", "always", r"\bsempre\b", "Leans false, but a third are true: read what it is attached to. \"è sempre vietato\" is a trap far more often than \"bisogna sempre\"."),
+    ("qualunque", "absolute", "qualunque / qualsiasi", "any / whatever", r"\b(qualunque|qualsiasi)\b", "\"In any situation\" style claims are usually false."),
+    ("ogni", "absolute", "ogni", "every", r"\bogni\b", "Leans false. True ones are usually safety duties (check every time, at every junction…)."),
+    ("tutti", "absolute", "tutti / tutte", "all", r"\btutt[ie]\b", "Leans false, weaker than it looks: read the whole statement."),
+    ("unicamente", "restrict", "unicamente", "solely", r"\bunicamente\b", "Every statement in the bank with this word is false."),
+    ("obbligatoriamente", "restrict", "obbligatoriamente", "obligatorily", r"\bobbligatoriamente\b", "Every statement in the bank with this word is false."),
+    ("esclusivamente", "restrict", "esclusivamente", "exclusively", r"\besclusivamente\b", "Nearly always false."),
+    ("solo", "restrict", "solo / soltanto", "only", r"\b(solo|soltanto)\b", "Three in four are false: \"only\" narrows a rule that is usually wider. Check what else it would leave out."),
+    ("solo-se", "restrict", "solo se", "only if", r"\bsolo se\b", "\"Only if\" is false about 4 times in 5."),
+    ("rapidamente", "fast", "rapidamente", "quickly", r"\brapidamente\b", "Doing things quickly at the wheel is rarely the right answer."),
+    ("energicamente", "fast", "energicamente", "energetically", r"\benergicamente\b", "Braking or steering energetically: false every time."),
+    ("aumentare", "fast", "aumentare la velocità", "speed up", r"\baumentare la velocità\b", "Speeding up is almost never the answer."),
+    ("evitare-brusche", "soft", "evitare / non … brusche", "avoid sudden moves", r"\b(evitare|senza|non)\b[^.]{0,40}\bbrusc", "Avoiding sudden manoeuvres is always right."),
+    ("ordinariamente", "soft", "ordinariamente", "ordinarily", r"\bordinariamente\b", "The soft version of \"sempre\": every one in the bank is true."),
+    ("moderare", "soft", "moderare / ridurre la velocità", "slow down", r"\b(moderare|ridurre la velocità)\b", "Slowing down is the usual right answer: about 3 in 4 are true."),
+    ("prudenza", "soft", "prudenza / prudente", "caution", r"\bprudent[ei]\b|\bprudenza\b", "Statements that ask for caution are true about 3 times in 4."),
+    ("di-norma", "soft", "di norma", "as a rule", r"\bdi norma\b", "Leaves room for exceptions, so it leans true."),
+    ("brusco", "myth", "brusco / bruscamente", "sudden, brusque", r"\bbrusc\w*", "Myth: it is only false when it tells you to act brusquely. \"Evitare manovre brusche\" is true."),
+    ("deve", "myth", "deve / devono", "must", r"\b(deve|devono)\b", "Coin flip, leaning true. No help on its own."),
+    ("puo", "myth", "può / possono", "can, may", r"\b(può|possono)\b", "Coin flip. No help on its own."),
+    ("non", "myth", "non", "not", r"\bnon\b", "Exactly 50/50. A negation tells you nothing: read it twice so you don't flip it in your head."),
+    ("vietato", "myth", "vietato / consentito", "forbidden / allowed", r"\bvietat\w*|\bconsentit\w*", "Coin flip. These are the questions you have to actually know."),
+]
+TRUCCHI_GROUPS = [
+    ("absolute", "Words that claim no exceptions", "Lean FALSO"),
+    ("restrict", "Words that narrow a rule", "Lean FALSO"),
+    ("fast", "Sudden or fast actions", "Lean FALSO"),
+    ("soft", "Careful, moderate words", "Lean VERO"),
+    ("myth", "Myths and coin flips", "No help alone"),
+]
+_TRUCCHI_RE = {t[0]: re.compile(t[4]) for t in TRUCCHI}
+_trucchi_cache = {}
+
+
+def trucchi_matches():
+    """{rule id: [question rows]}, measured once per content-cache refresh."""
+    rows = content("questions")["rows"]
+    if _trucchi_cache.get("rows") is not rows:
+        out = {k: [] for k in _TRUCCHI_RE}
+        for q in rows:
+            text = q["q_it"].lower().replace("’", "'")
+            for k, rx in _TRUCCHI_RE.items():
+                if rx.search(text):
+                    out[k].append(q)
+        _trucchi_cache.update(rows=rows, out=out)
+    return _trucchi_cache["out"]
+
+
+def q_brief(q):
+    return {k: q.get(k) for k in ("id", "q_it", "answer", "q_en", "image_url", "trap_words")}
+
+
+@app.get("/api/trucchi")
+def trucchi():
+    m = trucchi_matches()
+    rules = []
+    for rid, group, it, en, _, tip in TRUCCHI:
+        qs = m[rid]
+        n, f = len(qs), sum(1 for q in qs if not q["answer"])
+        if not n:
+            continue
+        lean_false = f * 2 >= n
+        exceptions = [q for q in qs if q["answer"] == lean_false]          # the minority: the ones that catch you out
+        day_shuffle(exceptions, "trucchi-ex", rid)
+        rules.append({"id": rid, "group": group, "it": it, "en": en, "tip": tip, "n": n, "false": f,
+                      "pct_false": round(100 * f / n), "exceptions": len(exceptions),
+                      "examples": [q_brief(q) for q in exceptions[:3]]})
+    return {"groups": [{"id": g, "title": t, "verdict": v} for g, t, v in TRUCCHI_GROUPS], "rules": rules,
+            "total": len(content("questions")["rows"])}
+
+
+@app.get("/api/trucchi/{rid}/drill")
+def trucchi_drill(rid: str, n: int = 30):
+    """Questions with the pattern: every exception first (they are what the trick gets wrong), then the rest."""
+    if rid not in _TRUCCHI_RE:
+        raise HTTPException(404, "unknown trick")
+    qs = trucchi_matches()[rid]
+    lean_false = sum(1 for q in qs if not q["answer"]) * 2 >= len(qs)
+    ex = [q for q in qs if q["answer"] == lean_false]
+    rest = [q for q in qs if q["answer"] != lean_false]
+    random.shuffle(ex)
+    random.shuffle(rest)
+    picked = (ex + rest)[:max(1, min(n, 60))]
+    random.shuffle(picked)
+    return {"questions": copies(picked), "exceptions": len(ex)}
+
+
+# ---------- crash course: a sprint per topic, mistakes first, then unseen spread over every stop ----------
+
+CRASH_SPRINT = int(os.getenv("CRASH_SPRINT", "20"))
+
+
+@app.get("/api/crash")
+def crash_plan(user: str = Query(...)):
+    """Per topic: how much of it the user has seen and how well, plus crash sprints done. Sorted by topic order."""
+    qs = content("questions")["rows"]
+    prog = {r["question_id"]: r for r in fetch_all("progress", "question_id,seen,wrong,box", user_id=user)}
+    sprints = {}
+    for r in sb.table("sessions").select("ref_id,correct,total").eq("user_id", user).eq("kind", "crash").execute().data:
+        sprints.setdefault(r["ref_id"], []).append(r)
+    out = []
+    for t in sorted(content("topics")["rows"], key=lambda t: t["ord"]):
+        mine = [q for q in qs if q["topic_id"] == t["id"]]
+        rows = [prog[q["id"]] for q in mine if q["id"] in prog]
+        attempts = sum(r["seen"] for r in rows)
+        wrong = sum(r["wrong"] for r in rows)
+        sp = sprints.get(t["id"], [])
+        out.append({"id": t["id"], "ord": t["ord"], "title_en": t["title_en"], "title_it": t["title_it"],
+                    "questions": len(mine), "seen": sum(1 for r in rows if r["seen"] > 0),
+                    "to_fix": sum(1 for r in rows if r["wrong"] > 0 and r["box"] < 2),
+                    "accuracy": round(100 * (attempts - wrong) / attempts) if attempts >= 5 else None,
+                    "sprints": len(sp),
+                    "last_sprint_pct": round(100 * sp[-1]["correct"] / max(1, sp[-1]["total"])) if sp else None})
+    return {"topics": out, "sprint_size": CRASH_SPRINT}
+
+
+@app.get("/api/crash/{tid}")
+def crash_sprint(tid: str, user: str = Query(...), n: int = 0):
+    """A sprint: up to half the user's unfixed mistakes in the topic, then questions never answered, taken one per
+    stop in turn so a sprint covers the whole topic, then the weakest-known ones."""
+    n = max(5, min(n or CRASH_SPRINT, 50))
+    stops = content("subtopics")["by_topic"].get(tid)
+    if not stops:
+        raise HTTPException(404, "topic not found")
+    by_sub = content("questions")["by_sub"]
+    ids = [q["id"] for s in stops for q in by_sub.get(s["id"], [])]
+    pm = progress_map(user, ids, select="question_id,seen,wrong,box")
+    picked, taken = [], set()
+
+    def take(q):
+        if q["id"] not in taken and len(picked) < n:
+            picked.append(q)
+            taken.add(q["id"])
+
+    fix = [q for s in stops for q in by_sub.get(s["id"], []) if pm.get(q["id"], {}).get("wrong") and pm[q["id"]]["box"] < 2]
+    random.shuffle(fix)
+    for q in fix[:n // 2]:
+        take(q)
+    lanes = []
+    for s in random.sample(stops, len(stops)):
+        lane = [q for q in by_sub.get(s["id"], []) if q["id"] not in pm]
+        random.shuffle(lane)
+        lanes.append(lane)
+    while len(picked) < n and any(lanes):
+        for lane in lanes:
+            if lane:
+                take(lane.pop())
+    if len(picked) < n:
+        known = sorted((q for s in stops for q in by_sub.get(s["id"], []) if q["id"] in pm),
+                       key=lambda q: (pm[q["id"]]["box"], -pm[q["id"]]["wrong"], random.random()))
+        for q in known:
+            take(q)
+    random.shuffle(picked)
+    return {"topic": {k: content("topics")["by_id"][tid][k] for k in ("id", "title_en", "title_it")},
+            "questions": copies(picked), "fixes": min(len(fix), n // 2)}
+
+
 # ---------- static PWA ----------
 
 @app.get("/")

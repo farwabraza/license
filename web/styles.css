@@ -240,3 +240,21 @@ input[type=text] { width: 100%; font: inherit; padding: 12px; border-radius: 10p
 .weakline { margin: 2px 0 6px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .chip { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--red); background: var(--red-soft); color: var(--red); font-weight: 700; font-size: 14px; }
+
+/* crash course + trucchi */
+.node.done.crash .dot { border-color: var(--green); background: var(--green); }
+.plan { margin: 0; padding-left: 20px; line-height: 1.7; }
+.plan a { color: var(--blue); font-weight: 700; }
+input[type="date"] { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 4px 6px; }
+.trucco .row > :last-child { flex: none; }
+.trucco .badge { display: inline-block; font-size: 13px; font-weight: 800; padding: 3px 10px; border-radius: 999px; }
+h2 .badge { display: inline-block; font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; vertical-align: middle; }
+.tword { font-size: 20px; font-weight: 800; }
+.tbar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin: 10px 0 6px; background: var(--line); }
+.tbar i { display: block; height: 100%; }
+.tbar .v { background: var(--green); }
+.tbar .f { background: var(--red); }
+.small.ok { color: var(--green); font-weight: 700; }
+.small.no { color: var(--red); font-weight: 700; }
+.trucco summary { cursor: pointer; }
+.list .item .thumb { float: right; width: 64px; height: 64px; object-fit: contain; margin: 0 0 6px 10px; background: #fff; border-radius: 8px; }
