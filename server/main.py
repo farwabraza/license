@@ -775,41 +775,71 @@ def tutor(t: TutorAsk):
 
 # (id, group, Italian pattern shown, English, regex on the lower-cased statement, tip). The counts are not written
 # here: they are measured on the questions table every time the content cache refreshes, so they always match the bank.
+W = "[a-zà-ù]*"                      # "rest of the word", valid in Python and in the browser's regex
+# (id, group, Italian shown, English, pattern, tip, highlight in drills). A pattern is plain text with | and W only, so
+# the app can reuse it to colour the words; it is matched on whole words of the lower-cased statement. Counts are not
+# written here: they are measured on the questions table whenever the content cache refreshes.
 TRUCCHI = [
-    ("mai", "absolute", "mai", "never", r"\bmai\b", "Almost every 'mai' statement is false: the code rarely forbids something in every case."),
-    ("in-ogni-caso", "absolute", "in ogni caso", "in any case", r"\bin ogni caso\b", "\"In ogni caso\" claims a rule with no exceptions. That is nearly always the lie."),
-    ("sempre", "absolute", "sempre", "always", r"\bsempre\b", "Leans false, but a third are true: read what it is attached to. \"è sempre vietato\" is a trap far more often than \"bisogna sempre\"."),
-    ("qualunque", "absolute", "qualunque / qualsiasi", "any / whatever", r"\b(qualunque|qualsiasi)\b", "\"In any situation\" style claims are usually false."),
-    ("ogni", "absolute", "ogni", "every", r"\bogni\b", "Leans false. True ones are usually safety duties (check every time, at every junction…)."),
-    ("tutti", "absolute", "tutti / tutte", "all", r"\btutt[ie]\b", "Leans false, weaker than it looks: read the whole statement."),
-    ("unicamente", "restrict", "unicamente", "solely", r"\bunicamente\b", "Every statement in the bank with this word is false."),
-    ("obbligatoriamente", "restrict", "obbligatoriamente", "obligatorily", r"\bobbligatoriamente\b", "Every statement in the bank with this word is false."),
-    ("esclusivamente", "restrict", "esclusivamente", "exclusively", r"\besclusivamente\b", "Nearly always false."),
-    ("solo", "restrict", "solo / soltanto", "only", r"\b(solo|soltanto)\b", "Three in four are false: \"only\" narrows a rule that is usually wider. Check what else it would leave out."),
-    ("solo-se", "restrict", "solo se", "only if", r"\bsolo se\b", "\"Only if\" is false about 4 times in 5."),
-    ("rapidamente", "fast", "rapidamente", "quickly", r"\brapidamente\b", "Doing things quickly at the wheel is rarely the right answer."),
-    ("energicamente", "fast", "energicamente", "energetically", r"\benergicamente\b", "Braking or steering energetically: false every time."),
-    ("aumentare", "fast", "aumentare la velocità", "speed up", r"\baumentare la velocità\b", "Speeding up is almost never the answer."),
-    ("evitare-brusche", "soft", "evitare / non … brusche", "avoid sudden moves", r"\b(evitare|senza|non)\b[^.]{0,40}\bbrusc", "Avoiding sudden manoeuvres is always right."),
-    ("ordinariamente", "soft", "ordinariamente", "ordinarily", r"\bordinariamente\b", "The soft version of \"sempre\": every one in the bank is true."),
-    ("moderare", "soft", "moderare / ridurre la velocità", "slow down", r"\b(moderare|ridurre la velocità)\b", "Slowing down is the usual right answer: about 3 in 4 are true."),
-    ("prudenza", "soft", "prudenza / prudente", "caution", r"\bprudent[ei]\b|\bprudenza\b", "Statements that ask for caution are true about 3 times in 4."),
-    ("di-norma", "soft", "di norma", "as a rule", r"\bdi norma\b", "Leaves room for exceptions, so it leans true."),
-    ("brusco", "myth", "brusco / bruscamente", "sudden, brusque", r"\bbrusc\w*", "Myth: it is only false when it tells you to act brusquely. \"Evitare manovre brusche\" is true."),
-    ("deve", "myth", "deve / devono", "must", r"\b(deve|devono)\b", "Coin flip, leaning true. No help on its own."),
-    ("puo", "myth", "può / possono", "can, may", r"\b(può|possono)\b", "Coin flip. No help on its own."),
-    ("non", "myth", "non", "not", r"\bnon\b", "Exactly 50/50. A negation tells you nothing: read it twice so you don't flip it in your head."),
-    ("vietato", "myth", "vietato / consentito", "forbidden / allowed", r"\bvietat\w*|\bconsentit\w*", "Coin flip. These are the questions you have to actually know."),
+    ("mai", "absolute", "mai", "never", "mai", "Almost every 'mai' statement is false: the code rarely forbids something in every case.", True),
+    ("in-ogni-caso", "absolute", "in ogni caso", "in any case", "in ogni caso", "\"In ogni caso\" claims a rule with no exceptions. That is nearly always the lie.", True),
+    ("sempre", "absolute", "sempre", "always", "sempre", "Leans false, but a third are true: read what it is attached to.", True),
+    ("qualunque", "absolute", "qualunque / qualsiasi", "any / whatever", "qualunque|qualsiasi", "\"In any situation\" style claims are usually false.", True),
+    ("ogni", "absolute", "ogni", "every", "ogni", "Leans false. True ones are usually safety duties (check every time, at every junction…).", True),
+    ("tutti", "absolute", "tutti / tutte", "all", "tutti|tutte", "Leans false, weaker than it looks: read the whole statement.", True),
+    ("unicamente", "restrict", "unicamente", "solely", "unicamente", "Every statement in the bank with this word is false.", True),
+    ("obbligatoriamente", "restrict", "obbligatoriamente", "obligatorily", "obbligatoriamente", "Every statement in the bank with this word is false.", True),
+    ("esclusivamente", "restrict", "esclusivamente", "exclusively", "esclusivamente", "Nearly always false.", True),
+    ("solo", "restrict", "solo / soltanto", "only", "solo|soltanto", "Three in four are false: \"only\" narrows a rule that is usually wider.", True),
+    ("solo-se", "restrict", "solo se", "only if", "solo se", "\"Only if\" is false about 4 times in 5.", True),
+    ("purche", "restrict", "purché", "provided that", "purché", "A made-up condition: \"allowed, provided that…\" is false 3 times in 4.", True),
+    ("non-obbligatorio", "relax", "non è obbligatorio", "is not compulsory", "non è obbligatori[oa]", "The exam never tells you a duty is off. Every one is false.", True),
+    ("non-necessario", "relax", "non è necessario", "is not necessary", "non è necessari[oa]", "Same idea: saying a precaution is not needed is false 9 times in 10.", True),
+    ("non-occorre", "relax", "non occorre", "there is no need to", "non occorre", "\"No need to…\" is false about 4 times in 5.", True),
+    ("facoltativo", "relax", "facoltativo", "optional", f"facoltativ{W}", "Nothing in the code is 'optional' in these questions: all false.", True),
+    ("suonare", "relax", "suonare / clacson", "sound the horn", "suonare|clacson|avvisatore acustico", "Using the horn is rarely the right answer.", True),
+    ("rapidamente", "fast", "rapidamente", "quickly", "rapidamente", "Doing things quickly at the wheel is rarely the right answer.", True),
+    ("veloce", "fast", "veloce / velocemente", "fast", f"veloc[ei]|velocemente", "Going fast: false about 2 times in 3.", True),
+    ("energicamente", "fast", "energicamente", "energetically", "energicamente", "Braking or steering energetically: false every time.", True),
+    ("aumentare", "fast", "aumentare la velocità", "speed up", "aumentare la velocità", "Speeding up is almost never the answer.", True),
+    ("evitare-brusche", "soft", "evitare / non … brusche", "avoid sudden moves", f"(?:evitare|senza|non)[^.]{{0,40}}brusc{W}", "Avoiding sudden manoeuvres is always right.", False),
+    ("ordinariamente", "soft", "ordinariamente", "ordinarily", "ordinariamente", "The soft version of \"sempre\": every one in the bank is true.", True),
+    ("moderare", "soft", "moderare / ridurre la velocità", "slow down", "moderare|ridurre la velocità", "Slowing down is the usual right answer.", True),
+    ("prudenza", "soft", "prudenza / prudente", "caution", "prudent[ei]|prudenza", "Statements that ask for caution are true about 3 times in 4.", True),
+    ("attenzione", "soft", "attenzione", "attention", "attenzione", "Paying attention is true about 3 times in 4.", True),
+    ("richiede", "soft", "richiede", "requires", "richiede", "\"The sign requires…\" is true every time.", True),
+    ("invita", "soft", "invita a", "invites you to", "invita", "\"The sign invites you to…\" is true 9 times in 10.", True),
+    ("potrebbero", "soft", "potrebbero", "might", "potrebbero", "Others \"might\" do something dangerous: true, so be careful.", True),
+    ("assicurarsi", "soft", "assicurarsi / verificare / controllare che", "make sure / check that", "assicurarsi|accertarsi|verificare|controllare che", "Checking first is right about 9 times in 10.", True),
+    ("si-puo-trovare", "soft", "si può trovare", "can be found", "si può trovare", "\"This sign can be found…\" is true 9 times in 10.", True),
+    ("abbinato", "soft", "abbinato / integrato", "combined with (a panel)", "abbinato|integrato", "\"Can be combined with a panel\" is true about 9 times in 10.", True),
+    ("salvo", "soft", "salvo", "unless, except", "salvo", "A rule stated with its exception is usually the real rule.", True),
+    ("di-norma", "soft", "di norma", "as a rule", "di norma", "Leaves room for exceptions, so it leans true.", False),
+    ("brusco", "myth", "brusco / bruscamente", "sudden, brusque", f"brusc{W}", "Myth: it is only false when it tells you to act brusquely. \"Evitare manovre brusche\" is true.", False),
+    ("deve", "myth", "deve / devono", "must", "deve|devono", "Coin flip, leaning true. No help on its own.", False),
+    ("puo", "myth", "può / possono", "can, may", "può|possono", "Coin flip. No help on its own.", False),
+    ("non", "myth", "non", "not", "non", "Exactly 50/50. A negation tells you nothing: read it twice so you don't flip it in your head.", False),
+    ("vietato", "myth", "vietato / consentito", "forbidden / allowed", f"vietat{W}|consentit{W}", "Coin flip. These are the questions you have to actually know.", False),
 ]
 TRUCCHI_GROUPS = [
     ("absolute", "Words that claim no exceptions", "Lean FALSO"),
     ("restrict", "Words that narrow a rule", "Lean FALSO"),
+    ("relax", "Words that relax a duty", "Lean FALSO"),
     ("fast", "Sudden or fast actions", "Lean FALSO"),
     ("soft", "Careful, moderate words", "Lean VERO"),
     ("myth", "Myths and coin flips", "No help alone"),
 ]
-_TRUCCHI_RE = {t[0]: re.compile(t[4]) for t in TRUCCHI}
+
+
+def word_re(src):
+    return re.compile(rf"(?<![a-zà-ù])(?:{src})(?![a-zà-ù])")
+
+
+_TRUCCHI_RE = {t[0]: word_re(t[4]) for t in TRUCCHI}
 _trucchi_cache = {}
+
+
+def q_text(q):
+    return q["q_it"].lower().replace("’", "'")
 
 
 def trucchi_matches():
@@ -818,12 +848,181 @@ def trucchi_matches():
     if _trucchi_cache.get("rows") is not rows:
         out = {k: [] for k in _TRUCCHI_RE}
         for q in rows:
-            text = q["q_it"].lower().replace("’", "'")
+            text = q_text(q)
             for k, rx in _TRUCCHI_RE.items():
                 if rx.search(text):
                     out[k].append(q)
+        _trucchi_cache.clear()
         _trucchi_cache.update(rows=rows, out=out)
     return _trucchi_cache["out"]
+
+
+# ---------- topic rules: words that lean one way inside one topic (the sign families above all) ----------
+
+SIGN_SLUGS = ["segnali-pericolo", "segnali-precedenza", "segnali-divieto", "segnali-obbligo", "segnali-indicazione",
+              "segnali-temporanei-complementari", "pannelli-integrativi", "semafori-vigile", "segnali-orizzontali"]
+TOPIC_WORDS = [                      # candidates, tried in every topic; a topic keeps the ones that really lean there
+    ("vieta / divieto", "forbids", f"viet{W}|divieto"), ("obbligo / obbliga", "must", f"obblig{W}"),
+    ("preannuncia / preavvisa", "warns ahead of", f"preannuncia|preavvis{W}"), ("precedenza", "right of way", "precedenza"),
+    ("pericolo", "danger", f"pericol{W}"), ("moderare / rallentare / prudenza", "slow down, caution", "moderare|rallentare|prudenza"),
+    ("solo / soltanto", "only", "solo|soltanto"), ("sorpasso", "overtaking", f"sorpass{W}"),
+    ("sosta / parcheggio / fermata", "parking, stopping", f"sosta|parchegg{W}|fermata"),
+    ("consente / permette", "allows", f"consente|permette|consentit{W}"), ("metri", "metres", "metri"),
+    ("autostrada", "motorway", f"autostrad{W}"), ("pannello", "panel", "pannello"), ("indica", "indicates", "indica"),
+    ("anche", "also", "anche"), ("sempre", "always", "sempre"), ("fine", "end of", "fine"),
+    ("richiede / invita", "requires / invites", "richiede|invita"), ("si può trovare", "can be found", "si può trovare"),
+    ("abbinato / integrato", "combined with", "abbinato|integrato"), ("contemporaneamente", "at the same time", "contemporaneamente"),
+    ("rapidamente", "quickly", "rapidamente"), ("potrebbero", "might", "potrebbero"), ("salvo", "unless, except", "salvo"),
+    ("breve", "short, brief", "breve"), ("senso unico", "one-way", "senso unico"), ("corsia riservata", "reserved lane", f"corsia riservata|riservata a{W}"),
+    ("attenzione", "attention", "attenzione"), ("fermarsi / arrestarsi", "stop", "fermarsi|arrestarsi"),
+]
+RULE_MIN_N, RULE_MIN_PCT = 6, 75
+_TOPIC_WORD_RE = [(it, en, src, word_re(src)) for it, en, src in TOPIC_WORDS]
+
+
+def topic_rules():
+    """{topic id: [rule]} — the candidate words that lean at least RULE_MIN_PCT one way in that topic."""
+    rows = content("questions")["rows"]
+    if _trucchi_cache.get("topic_rows") is not rows:
+        counts = {}
+        for q in rows:
+            text = q_text(q)
+            for i, (_, _, _, rx) in enumerate(_TOPIC_WORD_RE):
+                if rx.search(text):
+                    c = counts.setdefault((q["topic_id"], i), [0, 0])
+                    c[0 if q["answer"] else 1] += 1
+        out = {}
+        for (tid, i), (v, f) in counts.items():
+            n = v + f
+            pct = round(100 * f / n)
+            if n >= RULE_MIN_N and max(pct, 100 - pct) >= RULE_MIN_PCT:
+                it, en, src, _ = _TOPIC_WORD_RE[i]
+                out.setdefault(tid, []).append({"it": it, "en": en, "src": src, "n": n, "false": f, "pct_false": pct})
+        for rules in out.values():
+            rules.sort(key=lambda r: (-max(r["pct_false"], 100 - r["pct_false"]), -r["n"]))
+        _trucchi_cache.update(topic_rows=rows, topic_rules=out)
+    return _trucchi_cache["topic_rules"]
+
+
+@app.get("/api/lean")
+def lean():
+    """The words the app colours in a statement: red leans Falso, green leans Vero. Global ones from TRUCCHI, plus
+    each topic's own. Only words that lean RULE_MIN_PCT or more are sent."""
+    m = trucchi_matches()
+    glob = []
+    for rid, _, it, en, src, _, hl in TRUCCHI:
+        qs = m[rid]
+        if not hl or len(qs) < RULE_MIN_N:
+            continue
+        pct = round(100 * sum(1 for q in qs if not q["answer"]) / len(qs))
+        if max(pct, 100 - pct) >= RULE_MIN_PCT - 5:
+            glob.append({"it": it, "en": en, "src": src, "pct_false": pct})
+    return {"global": glob, "topics": {tid: [{k: r[k] for k in ("it", "en", "src", "pct_false")} for r in rules]
+                                       for tid, rules in topic_rules().items()}}
+
+
+@app.get("/api/signs")
+def signs(user: str = Query(...)):
+    """Every topic with its picture count and its own word rules; sign families first, flagged."""
+    by_topic = content("subtopics")["by_topic"]
+    by_sub = content("questions")["by_sub"]
+    rules = topic_rules()
+    out = []
+    for t in sorted(content("topics")["rows"], key=lambda t: t["ord"]):
+        stops = by_topic.get(t["id"], [])
+        out.append({"id": t["id"], "ord": t["ord"], "slug": t["slug"], "title_en": t["title_en"], "title_it": t["title_it"],
+                    "sign": t["slug"] in SIGN_SLUGS, "stops": len(stops),
+                    "questions": sum(len(by_sub.get(s["id"], [])) for s in stops), "rules": rules.get(t["id"], [])})
+    return {"topics": out}
+
+
+@app.get("/api/topic_rules/{tid}/drill")
+def topic_rules_drill(tid: str, n: int = 20):
+    """Questions of the topic that contain one of its leaning words: the ones that go against the word first."""
+    rules = topic_rules().get(tid)
+    if not rules:
+        raise HTTPException(404, "no word rules for this topic")
+    rx = [(word_re(r["src"]), r["pct_false"] >= 50) for r in rules]
+    ex, rest = [], []
+    for q in content("questions")["rows"]:
+        if q["topic_id"] != tid:
+            continue
+        hits = [lean_false for r, lean_false in rx if r.search(q_text(q))]
+        if hits:
+            (ex if any(q["answer"] == lf for lf in hits) else rest).append(q)
+    random.shuffle(ex)
+    random.shuffle(rest)
+    n = max(5, min(n, 40))
+    picked = ex[:n // 3] + rest
+    picked = picked[:n]
+    random.shuffle(picked)
+    return {"questions": copies(picked), "exceptions": min(len(ex), n // 3)}
+
+
+@app.get("/api/topics/{tid}/cards")
+def topic_cards(tid: str):
+    """Truth cards: per stop, its picture and its true statements (what there is to know), plus its false ones for the
+    check that follows a few cards."""
+    t = content("topics")["by_id"].get(tid)
+    if not t:
+        raise HTTPException(404, "topic not found")
+    by_sub = content("questions")["by_sub"]
+    stops = []
+    for s in content("subtopics")["by_topic"].get(tid, []):
+        qs = by_sub.get(s["id"], [])
+        if not qs:
+            continue
+        stops.append({"id": s["id"], "ord": s["ord"], "title_en": s["title_en"], "title_it": s.get("title_it"),
+                      "image_url": s.get("image_url"),
+                      "truths": [dict(q) for q in qs if q["answer"]], "lies": [dict(q) for q in qs if not q["answer"]]})
+    return {"topic": {k: t[k] for k in ("id", "slug", "title_en", "title_it")}, "sign": t["slug"] in SIGN_SLUGS, "stops": stops}
+
+
+# ---------- numbers: every figure the bank asks about, on one sheet ----------
+
+NUM_GROUPS = [
+    ("speed", "Speeds", ("km/h",)), ("distance", "Distances and sizes", ("metri", "metro", "m", "cm", "km")),
+    ("weight", "Weights", ("tonnellate", "t", "kg", "quintali")), ("age", "Ages and time", ("anni", "anno", "mesi", "giorni", "ore", "minuti", "secondi")),
+    ("points", "Points and money", ("punti", "euro")), ("engine", "Engine and other", ("kw", "cm3", "cc", "g/l", "%", "per cento", "posti", "volte")),
+]
+_NUM_UNIT = {u: g for g, _, units in NUM_GROUPS for u in units}
+RE_NUM = re.compile(r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(" + "|".join(sorted(map(re.escape, _NUM_UNIT), key=len, reverse=True)) + r")(?![a-zà-ù0-9/])")
+
+
+def number_rows():
+    rows = content("questions")["rows"]
+    if _trucchi_cache.get("num_rows") is not rows:
+        out = []
+        for q in rows:
+            found = RE_NUM.findall(q_text(q))
+            if found:
+                n, u = found[0]
+                out.append((_NUM_UNIT[u], float(n.replace(",", ".")), u, q))
+        _trucchi_cache.update(num_rows=rows, numbers=out)
+    return _trucchi_cache["numbers"]
+
+
+@app.get("/api/numbers")
+def numbers():
+    topics = content("topics")["by_id"]
+    rows = number_rows()
+    groups = []
+    for gid, title, _ in NUM_GROUPS:
+        mine = [r for r in rows if r[0] == gid]
+        facts = sorted((r for r in mine if r[3]["answer"]), key=lambda r: (r[2], r[1], r[3]["topic_id"]))
+        if mine:
+            groups.append({"id": gid, "title": title, "statements": len(mine),
+                           "facts": [dict(q_brief(q), topic_id=q["topic_id"], topic=topics[q["topic_id"]]["title_en"],
+                                          num=f"{v:g} {u}") for _, v, u, q in facts]})
+    return {"groups": groups, "statements": len(rows)}
+
+
+@app.get("/api/numbers/drill")
+def numbers_drill(group: str = "", n: int = 20):
+    qs = [r[3] for r in number_rows() if not group or r[0] == group]
+    if not qs:
+        raise HTTPException(404, "no number statements")
+    return {"questions": copies(random.sample(qs, min(len(qs), max(5, min(n, 40)))))}
 
 
 def q_brief(q):
@@ -834,7 +1033,7 @@ def q_brief(q):
 def trucchi():
     m = trucchi_matches()
     rules = []
-    for rid, group, it, en, _, tip in TRUCCHI:
+    for rid, group, it, en, _, tip, _hl in TRUCCHI:
         qs = m[rid]
         n, f = len(qs), sum(1 for q in qs if not q["answer"])
         if not n:
