@@ -8,6 +8,7 @@
     unlockAll: localStorage.getItem('strada_unlock') === '1',
     subCache: {},
     health: null,
+    lean: null,                                                 // words to colour in a statement, from /api/lean
     topicAudio: null,                                           // the one <audio> of the topic lesson screen, while it is open
   };
 
@@ -52,9 +53,35 @@
     speechSynthesis.speak(u);
   }
 
-  function highlight(text, words, force) {
+  // ---- leaning words: red leans Falso, green leans Vero (measured on the bank; see /api/lean) ----
+  const leanCache = new Map();
+  function leanRules(tid) {
+    if (!state.lean || tid === false) return null;                // false: this text is shown without colours
+    if (!leanCache.has(tid)) {
+      const seen = new Set(), rules = [];
+      for (const r of [...(state.lean.topics[tid] || []), ...state.lean.global]) { if (!seen.has(r.src)) { seen.add(r.src); rules.push({ ...r, re: new RegExp(`^(?:${r.src})$`, 'iu') }); } }
+      const alts = rules.map(r => r.src).sort((x, y) => y.length - x.length).join('|');
+      leanCache.set(tid, rules.length ? { rules, re: new RegExp(`(^|[^\\p{L}])(${alts})(?=$|[^\\p{L}])`, 'giu') } : null);
+    }
+    return leanCache.get(tid);
+  }
+  function leanHits(text, tid) {
+    const L = leanRules(tid), hits = [];
+    if (!L) return hits;
+    for (const m of String(text).matchAll(L.re)) { const r = L.rules.find(x => x.re.test(m[2])); if (r && !hits.includes(r)) hits.push(r); }
+    return hits;
+  }
+  // one line under a statement: what each coloured word means and how often it is false
+  function leanLegend(text, tid, force) {
+    if (!state.highlights && !force) return '';
+    const hits = leanHits(text, tid);
+    return hits.length ? `<div class="leanline">${hits.map(r => `<span class="${r.pct_false >= 50 ? 'lf' : 'lv'}"><b>${h(r.it)}</b> = ${h(r.en)} · ${Math.max(r.pct_false, 100 - r.pct_false)}% ${r.pct_false >= 50 ? 'Falso' : 'Vero'}</span>`).join('')}</div>` : '';
+  }
+  function highlight(text, words, force, tid) {
     let out = h(text);
     if (!state.highlights && !force) return out;
+    const L = leanRules(tid);
+    if (L) out = out.replace(L.re, (m, pre, w) => { const r = L.rules.find(x => x.re.test(w)); return r ? `${pre}<u class="${r.pct_false >= 50 ? 'lf' : 'lv'}">${w}</u>` : m; });
     for (const w of words || []) {
       const re = new RegExp(`(^|[^\\p{L}])(${h(w).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})(?=$|[^\\p{L}])`, 'iu');
       out = out.replace(re, '$1<mark>$2</mark>');
@@ -91,7 +118,7 @@
     document.body.appendChild(t);
     setTimeout(() => t.remove(), 2200);
   }
-  const missedHtml = list => list.map(q => `<div class="item">${q.image_url ? `<img class="thumb" src="${h(q.image_url)}" alt="" loading="lazy">` : ''}<div>${highlight(q.q_it, q.trap_words, true)} <span class="muted small">→ ${q.answer ? 'Vero' : 'Falso'}</span></div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}${q.why_en ? `<div class="small">${h(q.why_en)}</div>` : ''}</div>`).join('');
+  const missedHtml = list => list.map(q => `<div class="item">${q.image_url ? `<img class="thumb" src="${h(q.image_url)}" alt="" loading="lazy">` : ''}<div>${highlight(q.q_it, q.trap_words, true, q.topic_id)} <span class="muted small">→ ${q.answer ? 'Vero' : 'Falso'}</span></div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}${q.why_en ? `<div class="small">${h(q.why_en)}</div>` : ''}</div>`).join('');
   // a stop opens when the one before it is passed, or once it has been quizzed itself (a stop quiz or a whole-topic run)
   const isLocked = (ord, prevPassed, tried) => !state.unlockAll && ord > 1 && !prevPassed && !tried;
 
@@ -135,6 +162,7 @@
       <div class="bar"><h1>The road</h1><span class="crumb">${h(state.user)}</span></div>
       <p class="muted">${done} of ${total} stops passed · ${ts.filter(t => t.mastered).length} of ${ts.length} topics mastered.</p>
       <div class="row"><button class="btn primary" data-go="#/crash">⚡ Crash course${daysLeft() >= 0 ? ` · ${daysLeft()} days` : ''}</button><button class="btn" data-go="#/trucchi">🎯 Trucchi</button></div>${gap(10)}
+      <div class="row"><button class="btn" data-go="#/signs">🚦 Sign cards</button><button class="btn" data-go="#/numbers">🔢 Numbers</button></div>${gap(10)}
       <button class="btn" data-go="#/repair">Repair test · 10 questions from your weakest topics</button>${gap(16)}
       <div class="road">${ts.map(t => {
         const cls = t.passed === t.subtopics ? 'done' : t.passed || t.lesson_done ? 'started' : '';
@@ -315,10 +343,10 @@
       const q = current.q;
       app.innerHTML = header() + `
         ${q.image_url ? `<div class="figure"><img src="${h(q.image_url)}" alt=""></div>` : ''}
-        <div class="statement">${highlight(q.q_it, q.trap_words)}</div>
+        <div class="statement">${highlight(q.q_it, q.trap_words, false, q.topic_id)}</div>${leanLegend(q.q_it, q.topic_id)}
         <div class="tools">
           <button class="btn small" data-say="${h(q.q_it)}">🔊 Listen</button>
-          <label class="toggle"><input type="checkbox" id="hl" ${state.highlights ? 'checked' : ''}> highlight trap words</label>
+          <label class="toggle"><input type="checkbox" id="hl" ${state.highlights ? 'checked' : ''}> highlight trap &amp; leaning words</label>
           ${current.wrongOnce ? '<span class="small muted">· repeat</span>' : ''}
         </div>${gap(16)}
         <div class="vf"><button class="btn" id="vero">Vero</button><button class="btn" id="falso">Falso</button></div>`;
@@ -343,7 +371,7 @@
       const trap = (q.trap_words || []).length ? `Trap word: <mark>${h(q.trap_words.join(', '))}</mark>${q.trap_type && q.trap_type !== 'none' ? ` <span class="muted small">(${h(q.trap_type)})</span>` : ''}` : '<span class="muted">No trap word — this one is about the rule itself.</span>';
       app.innerHTML = header() + `
         ${q.image_url ? `<div class="figure"><img src="${h(q.image_url)}" alt=""></div>` : ''}
-        <div class="statement">${highlight(q.q_it, q.trap_words, true)}</div>
+        <div class="statement">${highlight(q.q_it, q.trap_words, true, q.topic_id)}</div>${leanLegend(q.q_it, q.topic_id, true)}
         <div class="feedback ${correct ? 'ok' : 'no'}">
           <div class="verdict">${correct ? '✓ Correct' : '✗ Wrong'} — it's ${q.answer ? 'Vero' : 'Falso'}${correct ? '' : ' (this one comes back until you get it twice)'}</div>
           ${q.q_en ? `<p class="en">${h(q.q_en)}</p>` : ''}${q.why_en ? `<p>${h(q.why_en)}</p>` : ''}
@@ -463,7 +491,7 @@
         <div class="stack" id="fin"></div>`;
       const wl = document.getElementById('wrong');
       if (wl) for (const r of wrong) {
-        const item = el(`<div class="item"><div>${highlight(r.q.q_it, r.q.trap_words, true)} <span class="muted small">→ ${r.q.answer ? 'Vero' : 'Falso'}${r.given === null ? ' (skipped)' : ''}</span></div>
+        const item = el(`<div class="item"><div>${highlight(r.q.q_it, r.q.trap_words, true, r.q.topic_id)} <span class="muted small">→ ${r.q.answer ? 'Vero' : 'Falso'}${r.given === null ? ' (skipped)' : ''}</span></div>
           ${r.q.q_en ? `<div class="small muted">${h(r.q.q_en)}</div>` : ''}${r.q.why_en ? `<div class="small">${h(r.q.why_en)}</div>` : ''}<div class="tbox"></div></div>`);
         if (state.health?.tutor && r.given !== null) { const b = el(`<button class="btn small" style="margin-top:8px">Ask tutor</button>`); b.onclick = () => askTutor(b, r.q.id, r.given, item.querySelector('.tbox')); item.appendChild(b); }
         wl.appendChild(item);
@@ -783,8 +811,8 @@
       const q = current.q, st = stops[q.stop];
       mq.innerHTML = `<div class="kind">Stop ${q.stop + 1} of ${stops.length} · ${h(st.title_en)}${current.w ? ' · repeat' : ''}</div>
         ${q.image_url ? `<div class="figure"><img src="${h(q.image_url)}" alt=""></div>` : ''}
-        <div class="statement">${highlight(q.q_it, q.trap_words)}</div>
-        <label class="toggle"><input type="checkbox" id="hl" ${state.highlights ? 'checked' : ''}> highlight trap words</label>${gap(16)}
+        <div class="statement">${highlight(q.q_it, q.trap_words, false, tid)}</div>${leanLegend(q.q_it, tid)}
+        <label class="toggle"><input type="checkbox" id="hl" ${state.highlights ? 'checked' : ''}> highlight trap &amp; leaning words</label>${gap(16)}
         <div class="vf"><button class="btn" id="vero">Vero</button><button class="btn" id="falso">Falso</button></div>`;
       document.getElementById('vero').onclick = () => answer(true);
       document.getElementById('falso').onclick = () => answer(false);
@@ -807,7 +835,7 @@
       const trap = (q.trap_words || []).length ? `Trap word: <mark>${h(q.trap_words.join(', '))}</mark>${q.trap_type ? ` <span class="muted small">(${h(q.trap_type)})</span>` : ''}` : '<span class="muted">No trap word — this one is about the rule itself.</span>';
       mq.innerHTML = `
         ${q.image_url ? `<div class="figure"><img src="${h(q.image_url)}" alt=""></div>` : ''}
-        <div class="statement">${highlight(q.q_it, q.trap_words, true)}</div>
+        <div class="statement">${highlight(q.q_it, q.trap_words, true, tid)}</div>${leanLegend(q.q_it, tid, true)}
         <div class="feedback ${correct ? 'ok' : 'no'}">
           <div class="verdict">${correct ? '✓ Correct' : '✗ Wrong'} — it's ${q.answer ? 'Vero' : 'Falso'}${correct ? '' : ' (this one comes back until you get it twice)'}</div>
           ${q.q_en ? `<p class="en">${h(q.q_en)}</p>` : ''}${q.why_en ? `<p>${h(q.why_en)}</p>` : ''}
@@ -871,7 +899,7 @@
         <div class="title">${h(t.title_en)}</div>
         <div class="sub">${h(t.title_it)} · seen ${t.seen} of ${t.questions}${t.accuracy != null ? ` · ${t.accuracy}% right` : ''}${t.to_fix ? ` · <b style="color:var(--red)">${t.to_fix} to fix</b>` : ''}${t.sprints ? ` · ${t.sprints} sprint${t.sprints > 1 ? 's' : ''}, last ${t.last_sprint_pct}%` : ''}</div>
         <div class="meter"><i style="width:${Math.round(100 * cov(t))}%"></i></div>
-        <div class="row" style="margin-top:10px"><button class="btn small primary" data-go="#/sprint/${t.id}">Sprint · ${Math.min(d.sprint_size, t.questions)}</button><button class="btn small quiet" data-go="#/read/${t.id}">Lesson</button></div>
+        <div class="row" style="margin-top:10px"><button class="btn small primary" data-go="#/sprint/${t.id}">Sprint · ${Math.min(d.sprint_size, t.questions)}</button><button class="btn small" data-go="#/cards/${t.id}">Cards</button><button class="btn small quiet" data-go="#/read/${t.id}">Lesson</button></div>
       </div>`;
     const when = days > 1 ? `${days} days to go` : days === 1 ? 'Exam tomorrow' : days === 0 ? 'Exam day' : 'Exam date passed';
     app.innerHTML = bar('#/', 'Crash course') + `
@@ -886,6 +914,8 @@
           ${fixes.length ? `<li>Fix mistakes: ${fixes.map(t => `<a href="#/sprint/${t.id}">${h(t.title_en)} (${t.to_fix})</a>`).join(', ')}</li>` : ''}
           <li><a href="#/review">Review what's due</a></li>
           <li><a href="#/exam">One exam simulation</a>: 30 questions, 20 minutes, max 3 errors</li>
+          <li><a href="#/signs">Sign cards</a>: one family of signs, cards then the check</li>
+          <li><a href="#/numbers">Numbers sheet</a>: read one group, then drill it</li>
           <li><a href="#/trucchi">Trucchi</a>: 5 minutes on the tricks, for when you don't know</li>
         </ol></div>${gap(16)}
       <h3>All topics</h3><p class="small muted">Least seen first. The bar is how much of the topic you have answered at least once.</p>
@@ -938,6 +968,7 @@
       <div class="card"><p style="margin-top:0">Words that tip a statement towards Vero or Falso. Every percentage is counted on all ${d.total.toLocaleString()} official statements, so you can see how far each trick really goes.</p>
         <p class="small muted" style="margin:0">Use them only when you don't know the rule: they are odds, not answers. The drill on each one puts the <b>exceptions</b> first. Those are the questions built to catch people who rely on the trick.</p></div>${gap(16)}
       ${d.groups.map(g => { const rs = d.rules.filter(r => r.group === g.id); return rs.length ? `<h2>${h(g.title)} <span class="badge ${g.id === 'soft' ? 'green' : g.id === 'myth' ? 'blue' : 'red'}">${h(g.verdict)}</span></h2><div class="stack">${rs.map(rule).join('')}</div>${gap(16)}` : ''; }).join('')}
+      ${ladderHtml()}${gap(16)}
       <h2>How to use them</h2>
       <div class="card stack">
         <div><b>Swap the absolute for the soft word.</b> "Il limite di velocità nei centri abitati è <u>sempre</u> di 50 km/h" is <b>Falso</b> (some urban roads allow 70). The same sentence with <u>ordinariamente</u> is <b>Vero</b>.</div>
@@ -963,9 +994,160 @@
     });
   }
 
+  // ---------- when in doubt: the order to apply the rules ----------
+  const ladderHtml = () => `<div class="card ladder"><h3 style="margin-top:0">When in doubt</h3><ol>
+      <li><b>You know the sign or the rule?</b> Answer it. Ignore the tricks.</li>
+      <li><b>Wrong family verb?</b> A triangle that "vieta" or "obbliga", a blue circle that "vieta", a rectangle that talks about "sorpasso": <span class="lf">Falso</span>.</li>
+      <li><b>A red word?</b> mai, in ogni caso, solo, esclusivamente, non è obbligatorio, non è necessario, rapidamente: <span class="lf">Falso</span>.</li>
+      <li><b>A green word?</b> moderare, prudenza, richiede, invita, potrebbero, assicurarsi, salvo: <span class="lv">Vero</span>.</li>
+      <li><b>Does it make driving safer?</b> Slower, more careful, check first: <span class="lv">Vero</span>. Bolder, faster, "no need to": <span class="lf">Falso</span>.</li>
+      <li><b>Still nothing?</b> Longer, detailed statements lean Vero; short blunt ones lean Falso. Answer and move on: never leave one blank.</li>
+    </ol></div>`;
+
+  // ---------- sign families: shape and colour, what the family can and cannot say ----------
+  const svg = body => `<svg viewBox="0 0 48 48" width="48" height="48" aria-hidden="true">${body}</svg>`;
+  const FAMILY = {
+    'segnali-pericolo': { icon: svg('<path d="M24 5 45 42H3Z" fill="#fff" stroke="#C8102E" stroke-width="5" stroke-linejoin="round"/>'), shape: 'Red triangle, point up', says: 'Warns of a danger ahead. It never orders or forbids anything.' },
+    'segnali-precedenza': { icon: svg('<path d="M24 43 3 6h42Z" fill="#fff" stroke="#C8102E" stroke-width="5" stroke-linejoin="round"/>'), shape: 'Upside-down triangle, octagon STOP, yellow diamond', says: 'Says who goes first at a junction.' },
+    'segnali-divieto': { icon: svg('<circle cx="24" cy="24" r="19" fill="#fff" stroke="#C8102E" stroke-width="6"/>'), shape: 'Circle with a red border', says: 'Forbids something, from the sign onwards. It does not warn.' },
+    'segnali-obbligo': { icon: svg('<circle cx="24" cy="24" r="21" fill="#0B5AA8"/><path d="M24 36V14m-8 8 8-8 8 8" stroke="#fff" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>'), shape: 'Blue circle', says: 'Orders you to do something. It does not forbid and does not warn.' },
+    'segnali-indicazione': { icon: svg('<rect x="4" y="10" width="40" height="28" rx="4" fill="#0B5AA8"/><rect x="12" y="18" width="24" height="12" rx="2" fill="#fff"/>'), shape: 'Rectangle: blue, green (motorway), white (town), brown (tourist)', says: 'Gives information: places, directions, services. No orders, no bans.' },
+    'segnali-temporanei-complementari': { icon: svg('<rect x="4" y="10" width="40" height="28" rx="4" fill="#F5C842" stroke="#1F2328" stroke-width="2"/><path d="M14 30 24 16l10 14" stroke="#1F2328" stroke-width="3" fill="none"/>'), shape: 'Yellow background (road works), posts and markers', says: 'Temporary signs for road works, and markers that show the edge of the road.' },
+    'pannelli-integrativi': { icon: svg('<rect x="6" y="18" width="36" height="14" rx="2" fill="#fff" stroke="#1F2328" stroke-width="3"/><path d="M13 25h22" stroke="#1F2328" stroke-width="3"/>'), shape: 'Small white panel under another sign', says: 'Adds detail to the sign above it: distance, hours, which vehicles.' },
+    'semafori-vigile': { icon: svg('<rect x="15" y="3" width="18" height="42" rx="6" fill="#2E3339"/><circle cx="24" cy="12" r="5" fill="#C8102E"/><circle cx="24" cy="24" r="5" fill="#F5C842"/><circle cx="24" cy="36" r="5" fill="#237A57"/>'), shape: 'Traffic lights and the officer', says: 'Lights and the officer’s gestures. The officer beats the lights, the lights beat the signs.' },
+    'segnali-orizzontali': { icon: svg('<rect x="3" y="8" width="42" height="32" rx="4" fill="#2E3339"/><path d="M24 12v6m0 6v6m0 6v2" stroke="#fff" stroke-width="3"/><path d="M11 12v24M37 12v24" stroke="#fff" stroke-width="2"/>'), shape: 'Lines and symbols painted on the road', says: 'Continuous line: do not cross. Broken line: you may. Yellow: reserved or temporary.' },
+  };
+  const ruleChip = r => `<span class="rchip ${r.pct_false >= 50 ? 'lf' : 'lv'}"><b>${h(r.it)}</b> ${h(r.en)} · ${Math.max(r.pct_false, 100 - r.pct_false)}%</span>`;
+  const cardsKey = tid => `strada_cards:${state.user}:${tid}`;
+  const cardsAt = tid => { try { return +localStorage.getItem(cardsKey(tid)) || 0; } catch (_) { return 0; } };
+  const CARD_BATCH = 4;
+
+  async function signsView() {
+    setTab('home');
+    app.innerHTML = bar('#/', 'Sign cards') + `<div class="empty">Loading…</div>`;
+    let d; try { d = await api('/api/signs'); } catch (e) { app.innerHTML = errorCard(e, '#/signs'); return; }
+    if (location.hash !== '#/signs') return;
+    const fam = t => { const f = FAMILY[t.slug] || {}, at = Math.min(cardsAt(t.id), t.stops), red = t.rules.filter(r => r.pct_false >= 50), green = t.rules.filter(r => r.pct_false < 50);
+      return `<div class="card fam">
+        <div class="famhead">${f.icon || ''}<div><div class="tword">${h(t.title_en)}</div><div class="small muted">${h(t.title_it)} · ${t.stops} cards · ${t.questions} questions</div></div></div>
+        ${f.shape ? `<p style="margin:8px 0 4px"><b>${h(f.shape)}.</b> ${h(f.says)}</p>` : ''}
+        ${red.length ? `<div class="small muted">If the statement says this, it is almost always <b class="lf">Falso</b>:</div><div class="rchips">${red.map(ruleChip).join('')}</div>` : ''}
+        ${green.length ? `<div class="small muted">If it says this, almost always <b class="lv">Vero</b>:</div><div class="rchips">${green.map(ruleChip).join('')}</div>` : ''}
+        <div class="meter"><i style="width:${t.stops ? Math.round(100 * at / t.stops) : 0}%"></i></div>
+        <div class="row" style="margin-top:10px"><button class="btn small primary" data-go="#/cards/${t.id}">${at >= t.stops ? 'Cards again' : at ? `Cards · resume at ${at + 1}` : 'Cards'}</button>${t.rules.length ? `<button class="btn small" data-go="#/famdrill/${t.id}">Drill the words</button>` : ''}</div>
+      </div>`; };
+    const signs = d.topics.filter(t => t.sign), others = d.topics.filter(t => !t.sign);
+    app.innerHTML = bar('#/', 'Sign cards') + `
+      <h1>Sign cards</h1>
+      <div class="card"><p style="margin:0"><b>Half the exam bank is signs.</b> Each sign has about 5 true statements. Learn those from its card and everything else about that sign is Falso. Cards come ${CARD_BATCH} at a time, then a quick check on those ${CARD_BATCH}.</p></div>${gap(12)}
+      <div class="stack">${signs.map(fam).join('')}</div>${gap(16)}
+      <h2>Other topics</h2><p class="small muted">The same cards work without a picture: each stop's true statements, then a check.</p>
+      <div class="stack">${others.map(fam).join('')}</div>`;
+  }
+
+  async function cardsView(tid) {
+    setTab('home');
+    app.innerHTML = bar('#/signs', 'Cards') + `<div class="empty">Loading…</div>`;
+    let d; try { d = await api(`/api/topics/${tid}/cards`); } catch (e) { app.innerHTML = errorCard(e, `#/cards/${tid}`); return; }
+    if (location.hash !== `#/cards/${tid}`) return;
+    const stops = d.stops, n = stops.length, f = FAMILY[d.topic.slug] || {};
+    if (!n) { app.innerHTML = bar('#/signs', 'Cards') + `<div class="empty">No cards in this topic.</div>`; return; }
+    let i = Math.min(cardsAt(tid), n - 1);
+    if (cardsAt(tid) >= n) i = 0;
+    const save = v => { try { localStorage.setItem(cardsKey(tid), v); } catch (_) { /* ignore */ } };
+    const batchStart = k => k - (k % CARD_BATCH);
+
+    function card() {
+      const s = stops[i], lie = s.lies[(i * 7) % Math.max(1, s.lies.length)], end = Math.min(batchStart(i) + CARD_BATCH, n), last = i === end - 1;
+      app.innerHTML = bar('#/signs', d.topic.title_en) + `
+        <div class="row" style="align-items:baseline"><strong>Card ${i + 1} of ${n}</strong><span class="muted small" style="text-align:right">check after card ${end}</span></div>
+        <div class="progress"><i style="width:${Math.round(100 * i / n)}%"></i></div>
+        <div class="card tcard">
+          ${s.image_url ? `<div class="figure"><img src="${h(s.image_url)}" alt=""></div>` : ''}
+          <div class="famhead small">${f.icon ? f.icon.replace('width="48" height="48"', 'width="22" height="22"') : ''}<span class="muted">${h(f.shape || d.topic.title_en)}</span></div>
+          <h2 style="margin:6px 0 2px">${h(s.title_en)}</h2>${s.title_it ? `<div class="small muted">${h(s.title_it)}</div>` : ''}
+          <div class="truths">${s.truths.map(q => `<div class="truth"><span class="tick">✓</span><div><div>${highlight(q.q_it, q.trap_words, true, false)}</div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}</div><button class="say" data-say="${h(q.q_it)}" aria-label="Listen">🔊</button></div>`).join('')}</div>
+          ${lie ? `<div class="lie"><span class="tick">✗</span><div><div class="small muted">A typical lie about this one (${s.lies.length} in the bank):</div><div>${highlight(lie.q_it, lie.trap_words, true, tid)}</div>${lie.q_en ? `<div class="small muted">${h(lie.q_en)}</div>` : ''}</div></div>` : ''}
+        </div>${gap(12)}
+        <div class="row"><button class="btn" id="cprev" ${i === batchStart(i) ? 'disabled' : ''}>‹ Back</button><button class="btn primary" id="cnext">${last ? `Check these ${end - batchStart(i)} ›` : 'Next ›'}</button></div>`;
+      document.getElementById('cprev').onclick = () => { i--; card(); window.scrollTo(0, 0); };
+      document.getElementById('cnext').onclick = () => { if (last) check(batchStart(i), end); else { i++; card(); window.scrollTo(0, 0); } };
+    }
+    function check(from, to) {
+      const qs = [];
+      for (const s of stops.slice(from, to)) { const t = shuffle(s.truths), l = shuffle(s.lies); qs.push(...t.slice(0, 2), ...l.slice(0, 2)); }
+      runDrill({
+        questions: shuffle(qs), back: `#/cards/${tid}`, crumb: `${d.topic.title_en} · check`,
+        onFinish: res => {
+          const done = to >= n;
+          save(done ? n : to);
+          app.innerHTML = bar('#/signs', `${d.topic.title_en} · check`) + `
+            <div class="result"><div class="big" style="color:${res.pct >= 90 ? 'var(--green)' : res.pct >= 75 ? 'var(--ink)' : 'var(--red)'}">${res.pct}%</div><p class="muted">first-try · cards ${from + 1}–${to} of ${n}</p></div>
+            ${res.missed.length ? `<h3>Missed</h3>${gap(8)}<div class="list">${missedHtml(res.missed)}</div>${gap(12)}` : '<div class="card"><strong>Clean.</strong></div>' + gap(12)}
+            <div class="stack">${done ? `<button class="btn primary" data-go="#/signs">Family done · back to the families</button>` : `<button class="btn primary" id="cgo">Next ${Math.min(CARD_BATCH, n - to)} cards ›</button>`}
+              <button class="btn" id="cre">See these ${to - from} cards again</button><button class="btn quiet" data-go="#/signs">Stop for now</button></div>`;
+          const go = document.getElementById('cgo'); if (go) go.onclick = () => { i = to; card(); window.scrollTo(0, 0); };
+          document.getElementById('cre').onclick = () => { i = from; card(); window.scrollTo(0, 0); };
+        },
+      });
+    }
+    card();
+  }
+
+  async function familyDrill(tid) {
+    setTab('home');
+    app.innerHTML = bar('#/signs', 'Word drill') + `<div class="empty">Loading…</div>`;
+    let d; try { d = await api(`/api/topic_rules/${tid}/drill`); } catch (e) { app.innerHTML = errorCard(e, `#/famdrill/${tid}`); return; }
+    if (location.hash !== `#/famdrill/${tid}`) return;
+    runDrill({
+      questions: d.questions, back: '#/signs', crumb: 'Word drill',
+      onFinish: res => {
+        app.innerHTML = bar('#/signs', 'Word drill') + `<div class="result"><div class="big">${res.pct}%</div><p class="muted">first-try · ${res.total} questions · ${d.exceptions} went against the word</p></div>
+          ${res.missed.length ? `<h3>Missed</h3>${gap(8)}<div class="list">${missedHtml(res.missed)}</div>` : ''}${gap(16)}
+          <div class="stack"><button class="btn primary" data-go="#/signs">Back to the families</button><button class="btn" id="again">Another round</button></div>`;
+        document.getElementById('again').onclick = () => familyDrill(tid);
+      },
+    });
+  }
+
+  // ---------- numbers: every figure on one sheet, then a numbers-only drill ----------
+  async function numbersView() {
+    setTab('home');
+    app.innerHTML = bar('#/', 'Numbers') + `<div class="empty">Loading…</div>`;
+    let d; try { d = await api('/api/numbers'); } catch (e) { app.innerHTML = errorCard(e, '#/numbers'); return; }
+    if (location.hash !== '#/numbers') return;
+    const bold = (q) => h(q.q_it).replace(/(\d+(?:[.,]\d+)?\s*(?:km\/h|[\p{L}%\/]+\d?))/u, '<b class="num">$1</b>');
+    const group = g => { let last = '';
+      return `<details class="card numg" ${g.id === 'speed' ? 'open' : ''}><summary><b>${h(g.title)}</b> <span class="muted small">· ${g.facts.length} true facts · ${g.statements} statements</span></summary>
+        <button class="btn small" data-go="#/numdrill/${g.id}" style="margin:10px 0">Drill ${h(g.title.toLowerCase())}</button>
+        <div class="list">${g.facts.map(q => { const head = q.num !== last ? `<div class="numhead">${h(q.num)}</div>` : ''; last = q.num;
+          return `${head}<div class="item">${q.image_url ? `<img class="thumb" src="${h(q.image_url)}" alt="" loading="lazy">` : ''}<div>${bold(q)}</div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}<div class="small muted">${h(q.topic)}</div></div>`; }).join('')}</div></details>`; };
+    app.innerHTML = bar('#/', 'Numbers') + `
+      <h1>Numbers</h1>
+      <div class="card"><p style="margin:0">No trick works on a number: the same figure is true in one statement and false in the next. These are all the <b>true</b> ones, ${d.groups.reduce((a, g) => a + g.facts.length, 0)} facts. If the exam shows a different number for the same thing, it is Falso.</p></div>${gap(12)}
+      <button class="btn primary" data-go="#/numdrill/all">Drill all numbers · 20 questions</button>${gap(12)}
+      <div class="stack">${d.groups.map(group).join('')}</div>`;
+  }
+  async function numbersDrill(gid) {
+    setTab('home');
+    app.innerHTML = bar('#/numbers', 'Numbers drill') + `<div class="empty">Loading…</div>`;
+    let d; try { d = await api(`/api/numbers/drill${gid && gid !== 'all' ? `?group=${encodeURIComponent(gid)}` : ''}`); } catch (e) { app.innerHTML = errorCard(e, `#/numdrill/${gid}`); return; }
+    if (location.hash !== `#/numdrill/${gid}`) return;
+    runDrill({
+      questions: d.questions, back: '#/numbers', crumb: 'Numbers drill',
+      onFinish: res => {
+        app.innerHTML = bar('#/numbers', 'Numbers drill') + `<div class="result"><div class="big">${res.pct}%</div><p class="muted">first-try · ${res.total} questions</p></div>
+          ${res.missed.length ? `<h3>Missed</h3>${gap(8)}<div class="list">${missedHtml(res.missed)}</div>` : ''}${gap(16)}
+          <div class="stack"><button class="btn primary" data-go="#/numbers">Back to the sheet</button><button class="btn" id="again">Another round</button></div>`;
+        document.getElementById('again').onclick = () => numbersDrill(gid);
+      },
+    });
+  }
+
   async function route() {
     if (!state.user) return askUser();
     if (!state.health) { try { state.health = await fetch('/api/health').then(r => r.json()); } catch (_) { state.health = {}; } }
+    if (!state.lean) api('/api/lean').then(d => { state.lean = d; leanCache.clear(); }).catch(() => {});   // colours appear from the next screen on
     const [path, arg] = location.hash.replace(/^#\/?/, '').split('/');
     window.scrollTo(0, 0);
     window.speechSynthesis?.cancel();
@@ -988,6 +1170,11 @@
       case 'sprint': return sprintView(arg);
       case 'trucchi': return trucchiView();
       case 'trucco': return truccoDrill(arg);
+      case 'signs': return signsView();
+      case 'cards': return cardsView(arg);
+      case 'famdrill': return familyDrill(arg);
+      case 'numbers': return numbersView();
+      case 'numdrill': return numbersDrill(arg);
       default: location.hash = '#/';
     }
   }
