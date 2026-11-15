@@ -948,8 +948,9 @@
   async function trucchiView() {
     setTab('home');
     app.innerHTML = bar('#/', 'Trucchi') + `<div class="empty">Loading…</div>`;
-    let d; try { d = await api('/api/trucchi'); } catch (e) { app.innerHTML = errorCard(e, '#/trucchi'); return; }
+    let d, sg; try { [d, sg] = await Promise.all([api('/api/trucchi'), api('/api/signs').catch(() => null)]); } catch (e) { app.innerHTML = errorCard(e, '#/trucchi'); return; }
     if (location.hash !== '#/trucchi') return;
+    const byTopic = sg ? sg.topics.filter(t => t.rules.length) : [];
     const rule = r => {
       const pf = r.pct_false, leanF = pf >= 50, sure = Math.max(pf, 100 - pf);
       return `<div class="card trucco">
@@ -968,6 +969,11 @@
       <div class="card"><p style="margin-top:0">Words that tip a statement towards Vero or Falso. Every percentage is counted on all ${d.total.toLocaleString()} official statements, so you can see how far each trick really goes.</p>
         <p class="small muted" style="margin:0">Use them only when you don't know the rule: they are odds, not answers. The drill on each one puts the <b>exceptions</b> first. Those are the questions built to catch people who rely on the trick.</p></div>${gap(16)}
       ${d.groups.map(g => { const rs = d.rules.filter(r => r.group === g.id); return rs.length ? `<h2>${h(g.title)} <span class="badge ${g.id === 'soft' ? 'green' : g.id === 'myth' ? 'blue' : 'red'}">${h(g.verdict)}</span></h2><div class="stack">${rs.map(rule).join('')}</div>${gap(16)}` : ''; }).join('')}
+      ${byTopic.length ? `<h2>Words that only work in one topic</h2>
+        <p class="small muted">The same word can lean one way in one topic and mean nothing in another, so these count only inside the topic shown. Red leans Falso, green leans Vero; the % is how often.</p>
+        <div class="stack">${byTopic.map(t => `<div class="card"><div class="tword" style="font-size:17px">${h(t.title_en)}</div><div class="small muted">${h(t.title_it)}</div>
+          <div class="rchips">${t.rules.map(r => `<span class="rchip ${r.pct_false >= 50 ? 'lf' : 'lv'}"><b>${h(r.it)}</b> ${h(r.en)} · ${Math.max(r.pct_false, 100 - r.pct_false)}% ${r.pct_false >= 50 ? 'Falso' : 'Vero'} · ${r.n}</span>`).join('')}</div>
+          <button class="btn small" data-go="#/famdrill/${t.id}">Drill these words</button></div>`).join('')}</div>${gap(16)}` : ''}
       ${ladderHtml()}${gap(16)}
       <h2>How to use them</h2>
       <div class="card stack">
