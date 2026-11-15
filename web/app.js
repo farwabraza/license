@@ -948,8 +948,9 @@
   async function trucchiView() {
     setTab('home');
     app.innerHTML = bar('#/', 'Trucchi') + `<div class="empty">Loading…</div>`;
-    let d; try { d = await api('/api/trucchi'); } catch (e) { app.innerHTML = errorCard(e, '#/trucchi'); return; }
+    let d, sg; try { [d, sg] = await Promise.all([api('/api/trucchi'), api('/api/signs').catch(() => null)]); } catch (e) { app.innerHTML = errorCard(e, '#/trucchi'); return; }
     if (location.hash !== '#/trucchi') return;
+    const byTopic = sg ? sg.topics.filter(t => t.rules.length) : [];
     const rule = r => {
       const pf = r.pct_false, leanF = pf >= 50, sure = Math.max(pf, 100 - pf);
       return `<div class="card trucco">
@@ -968,6 +969,16 @@
       <div class="card"><p style="margin-top:0">Words that tip a statement towards Vero or Falso. Every percentage is counted on all ${d.total.toLocaleString()} official statements, so you can see how far each trick really goes.</p>
         <p class="small muted" style="margin:0">Use them only when you don't know the rule: they are odds, not answers. The drill on each one puts the <b>exceptions</b> first. Those are the questions built to catch people who rely on the trick.</p></div>${gap(16)}
       ${d.groups.map(g => { const rs = d.rules.filter(r => r.group === g.id); return rs.length ? `<h2>${h(g.title)} <span class="badge ${g.id === 'soft' ? 'green' : g.id === 'myth' ? 'blue' : 'red'}">${h(g.verdict)}</span></h2><div class="stack">${rs.map(rule).join('')}</div>${gap(16)}` : ''; }).join('')}
+      ${byTopic.length ? `<h2>Topic words</h2>
+        <p class="small muted">These words count only inside their own topic. First spot the topic from its <b class="cue">blue clue words</b> (or the sign's shape), then use its <b class="lf">red</b> and <b class="lv">green</b> words. Example: "breve" is Falso in parking questions, but "a breve distanza" on an information sign is Vero.</p>
+        <div class="stack">${byTopic.map(t => { const f = FAMILY[t.slug], cues = TOPIC_CUES[t.slug] || [];
+          return `<div class="card"><div class="famhead">${f ? f.icon.replace('width="48" height="48"', 'width="30" height="30"') : ''}<div><div class="tword" style="font-size:17px">${h(t.title_en)}</div><div class="small muted">${h(t.title_it)}</div></div></div>
+          <div class="small muted" style="margin-top:8px">You are in this topic when you see:</div>
+          <div class="rchips">${f ? `<span class="rchip cue"><b>the picture:</b> ${h(f.shape.toLowerCase())}</span>` : ''}${cues.map(([it, en]) => `<span class="rchip cue"><b>${h(it)}</b> ${h(en)}</span>`).join('')}</div>
+          <div class="small muted">Then these words tip the answer:</div>
+          <div class="rchips">${t.rules.map(r => `<span class="rchip ${r.pct_false >= 50 ? 'lf' : 'lv'}"><b>${h(r.it)}</b> ${h(r.en)} · ${Math.max(r.pct_false, 100 - r.pct_false)}% ${r.pct_false >= 50 ? 'Falso' : 'Vero'} · ${r.n}</span>`).join('')}</div>
+          <button class="btn small" data-go="#/famdrill/${t.id}">Drill these words</button></div>`; }).join('')}</div>${gap(16)}` : ''}
+      <details class="card"><summary><b>Sign cheat sheet</b> <span class="small muted">· shape and colour tell you the type</span></summary>${gap(8)}${cheatHtml()}</details>${gap(16)}
       ${ladderHtml()}${gap(16)}
       <h2>How to use them</h2>
       <div class="card stack">
@@ -1017,10 +1028,83 @@
     'semafori-vigile': { icon: svg('<rect x="15" y="3" width="18" height="42" rx="6" fill="#2E3339"/><circle cx="24" cy="12" r="5" fill="#C8102E"/><circle cx="24" cy="24" r="5" fill="#F5C842"/><circle cx="24" cy="36" r="5" fill="#237A57"/>'), shape: 'Traffic lights and the officer', says: 'Lights and the officer’s gestures. The officer beats the lights, the lights beat the signs.' },
     'segnali-orizzontali': { icon: svg('<rect x="3" y="8" width="42" height="32" rx="4" fill="#2E3339"/><path d="M24 12v6m0 6v6m0 6v2" stroke="#fff" stroke-width="3"/><path d="M11 12v24M37 12v24" stroke="#fff" stroke-width="2"/>'), shape: 'Lines and symbols painted on the road', says: 'Continuous line: do not cross. Broken line: you may. Yellow: reserved or temporary.' },
   };
+  // words that tell you which topic a statement belongs to (the most topic-specific words in the bank)
+  const TOPIC_CUES = {
+    'classificazione-veicoli': [['camper / roulotte', 'camper, caravan'], ['autoveicoli, motoveicoli', 'kinds of vehicle']],
+    'definizioni-stradali': [['a raso', 'same-level junction'], ['passo carrabile', 'driveway access'], ['livelli sfalsati', 'flyover junction']],
+    'segnali-pericolo': [['preannuncia', 'warns ahead of'], ['tratto di strada', 'stretch of road']],
+    'segnali-precedenza': [['dare precedenza', 'give way'], ['fermarsi e dare precedenza', 'stop and give way']],
+    'segnali-divieto': [['vieta', 'forbids'], ['divieto di', 'no …']],
+    'segnali-obbligo': [['obbliga', 'orders you to'], ['percorso', 'route, path']],
+    'segnali-indicazione': [['preavvisa', 'gives advance notice'], ['raggiungere', 'to reach']],
+    'segnali-temporanei-complementari': [['delineatore', 'marker post'], ['cono', 'cone'], ['barriera', 'barrier']],
+    'pannelli-integrativi': [['pannello integrativo', 'panel under a sign']],
+    'semafori-vigile': [['semaforo', 'traffic light'], ['vigile / agente', 'officer'], ['braccia', 'arms'], ['lampeggiante', 'flashing']],
+    'segnali-orizzontali': [['striscia', 'line on the road'], ['continua / discontinua', 'solid / broken'], ['segnaletica orizzontale', 'road markings']],
+    'luci-dispositivi': [['proiettori', 'headlights'], ['anabbaglianti', 'dipped beam'], ['catadiottri', 'reflectors']],
+    'veicolo-fermo-ingombro': [['segnale triangolare', 'warning triangle'], ['giubbotto', 'hi-vis vest'], ['ingombro', 'obstruction']],
+    'limiti-velocita': [['limite massimo', 'maximum limit'], ['extraurbane secondarie', 'secondary roads']],
+    'posizione-cambio-corsia': [['corsia', 'lane'], ['svoltare', 'to turn'], ['tenersi', 'keep to']],
+    'precedenze': [["nell'incrocio rappresentato", 'in the junction shown'], ['ordine', 'order'], ['passa per primo', 'goes first']],
+    'fermata-sosta': [['sosta', 'parking'], ['fermata', 'brief stop'], ['specchio retrovisore', 'mirror'], ['immettersi nel flusso', 'pull out into traffic']],
+    'autostrade': [['autostrada', 'motorway'], ['rampe / svincoli', 'ramps, junctions']],
+    'trasporto-carico-traino': [['rimorchio', 'trailer'], ['traino', 'towing'], ['carico', 'load']],
+    'documenti': [['patente', 'licence'], ['categoria', 'category'], ['punti', 'points']],
+    'cause-incidenti': [['incidente', 'accident'], ['pedone', 'pedestrian']],
+    'responsabilita-assicurazione': [['responsabilità', 'liability'], ['assicurazione', 'insurance'], ['risarcimento', 'compensation']],
+    'primo-soccorso': [['ferito / infortunato', 'injured person'], ['soccorrere', 'to give aid']],
+    'cinture-airbag-casco': [['casco', 'helmet'], ['cinture', 'seat belts'], ['airbag', 'airbag']],
+    'inquinamento': [['inquinamento', 'pollution'], ['scarico / marmitta', 'exhaust'], ['rumore', 'noise']],
+    'elementi-veicolo': [['sospensioni', 'suspension'], ['ammortizzatori', 'shock absorbers']],
+    'pneumatici-stabilita': [['pneumatici', 'tyres'], ['aderenza', 'grip'], ['gonfiaggio', 'inflation']],
+    'spie-simboli': [['spia', 'warning light'], ['simbolo', 'symbol']],
+    'luci': [], 'sorpasso': [['sorpasso / sorpassare', 'overtaking']], 'regolazione-velocita': [['regolare la velocità', 'adjust your speed']],
+    'distanza-sicurezza': [['distanza di sicurezza', 'safe distance'], ['tempo di reazione', 'reaction time']],
+  };
+  // ---------- sign cheat sheet: what the shape and colour alone tell you ----------
+  const mini = body => `<svg viewBox="0 0 48 48" width="34" height="34" aria-hidden="true">${body}</svg>`;
+  const CHEAT = [
+    ['Shape', [
+      [mini('<path d="M24 5 45 42H3Z" fill="#fff" stroke="#C8102E" stroke-width="5" stroke-linejoin="round"/>'), 'Triangle, point up, red border', 'Pericolo (warning). A danger is ahead, usually 150 m after the sign. It never orders or forbids.'],
+      [mini('<path d="M24 43 3 6h42Z" fill="#fff" stroke="#C8102E" stroke-width="5" stroke-linejoin="round"/>'), 'Triangle, point down', 'Dare precedenza (give way). You give way; you need not stop if the road is clear.'],
+      [mini('<path d="M16 4h16l12 12v16L32 44H16L4 32V16Z" fill="#C8102E"/><text x="24" y="29" font-size="11" font-weight="700" fill="#fff" text-anchor="middle" font-family="sans-serif">STOP</text>'), 'Red octagon', 'STOP. You must stop at the line every time, then give way.'],
+      [mini('<path d="M24 4 44 24 24 44 4 24Z" fill="#fff" stroke="#1F2328" stroke-width="2"/><path d="M24 12 36 24 24 36 12 24Z" fill="#F5C842"/>'), 'Yellow diamond', 'Diritto di precedenza: you have priority. With a black bar across it: your priority ends.'],
+      [mini('<circle cx="24" cy="24" r="19" fill="#fff" stroke="#C8102E" stroke-width="6"/>'), 'Circle with a red border', 'Divieto (prohibition). Something is forbidden from the sign onwards.'],
+      [mini('<circle cx="24" cy="24" r="21" fill="#0B5AA8"/>'), 'Blue circle', 'Obbligo (mandatory). You must do what it shows.'],
+      [mini('<rect x="5" y="9" width="38" height="30" rx="4" fill="#0B5AA8"/>'), 'Square or rectangle', 'Indicazione (information): places, directions, services. No orders.'],
+    ]],
+    ['Details that change the meaning', [
+      [mini('<circle cx="24" cy="24" r="21" fill="#C8102E"/><rect x="9" y="20" width="30" height="8" fill="#fff"/>'), 'Red disc, white bar', 'Senso vietato (no entry) from this side. The road is one-way against you.'],
+      [mini('<circle cx="24" cy="24" r="19" fill="#0B5AA8" stroke="#C8102E" stroke-width="5"/><path d="M11 11 37 37" stroke="#C8102E" stroke-width="5"/>'), 'Blue disc, red border, one slash', 'Divieto di sosta (no parking). A brief stop to let someone out is allowed.'],
+      [mini('<circle cx="24" cy="24" r="19" fill="#0B5AA8" stroke="#C8102E" stroke-width="5"/><path d="M11 11 37 37M37 11 11 37" stroke="#C8102E" stroke-width="5"/>'), 'Blue disc, red border, a cross', 'Divieto di fermata (no stopping at all), not even briefly.'],
+      [mini('<circle cx="24" cy="24" r="20" fill="#fff" stroke="#1F2328" stroke-width="2"/><path d="M12 36 36 12" stroke="#1F2328" stroke-width="5"/>'), 'White disc, black diagonal bar', 'Fine del divieto: the prohibition ends here.'],
+      [mini('<circle cx="24" cy="24" r="21" fill="#0B5AA8"/><path d="M9 39 39 9" stroke="#C8102E" stroke-width="5"/>'), 'Blue disc with a red slash', 'Fine dell\'obbligo: the obligation ends here.'],
+      [mini('<path d="M24 5 45 42H3Z" fill="#F5C842" stroke="#C8102E" stroke-width="5" stroke-linejoin="round"/>'), 'Yellow background', 'Temporary sign for road works (cantiere). It beats the normal signs while it is there.'],
+    ]],
+    ['Colour of direction signs', [
+      [mini('<rect x="4" y="14" width="40" height="20" rx="3" fill="#237A57"/>'), 'Green', 'Autostrada (motorway).'],
+      [mini('<rect x="4" y="14" width="40" height="20" rx="3" fill="#0B5AA8"/>'), 'Blue', 'Strade extraurbane (roads outside towns).'],
+      [mini('<rect x="4" y="14" width="40" height="20" rx="3" fill="#fff" stroke="#1F2328" stroke-width="2"/>'), 'White', 'Urban: inside the town (centro abitato).'],
+      [mini('<rect x="4" y="14" width="40" height="20" rx="3" fill="#7A4A21"/>'), 'Brown', 'Tourist and cultural places.'],
+      [mini('<rect x="4" y="14" width="40" height="20" rx="3" fill="#F5C842" stroke="#1F2328" stroke-width="2"/>'), 'Yellow', 'Temporary: detours and road works.'],
+    ]],
+    ['Panels under a sign', [
+      [mini('<rect x="5" y="16" width="38" height="16" rx="2" fill="#fff" stroke="#1F2328" stroke-width="2"/><text x="24" y="28" font-size="10" font-weight="700" text-anchor="middle" font-family="sans-serif">320 m</text>'), 'A distance alone', 'Distanza: the danger or rule STARTS that far ahead.'],
+      [mini('<rect x="3" y="16" width="42" height="16" rx="2" fill="#fff" stroke="#1F2328" stroke-width="2"/><text x="24" y="28" font-size="9" font-weight="700" text-anchor="middle" font-family="sans-serif">↑380 m↑</text>'), 'A distance between two arrows', 'Estesa: the danger or rule LASTS for that length.'],
+    ]],
+    ['Lights and lines', [
+      [mini('<rect x="15" y="3" width="18" height="42" rx="6" fill="#2E3339"/><circle cx="24" cy="12" r="5" fill="#C8102E"/><circle cx="24" cy="24" r="5" fill="#F5C842"/><circle cx="24" cy="36" r="5" fill="#237A57"/>'), 'Who wins', 'Officer (vigile) beats traffic lights, lights beat signs, signs beat road markings.'],
+      [mini('<rect x="3" y="8" width="42" height="32" rx="4" fill="#2E3339"/><path d="M16 12v24" stroke="#fff" stroke-width="3"/><path d="M32 12v5m0 5v5m0 5v4" stroke="#fff" stroke-width="3"/>'), 'Solid or broken line', 'Continua (solid): do not cross. Discontinua (broken): you may cross to overtake or turn.'],
+      [mini('<rect x="3" y="8" width="42" height="32" rx="4" fill="#2E3339"/><path d="M12 14h24v20H12Z" fill="none" stroke="#F5C842" stroke-width="3"/>'), 'Colour of lines', 'White: normal. Yellow: reserved (bus, taxi, disabled) or road works. Blue: paid parking.'],
+    ]],
+  ];
+  const cheatHtml = () => CHEAT.map(([title, rows]) => `<h3 class="cheath">${h(title)}</h3><div class="cheat">${rows.map(([icon, look, means]) => `<div class="cheatrow">${icon}<div><b>${h(look)}</b><div class="small">${h(means)}</div></div></div>`).join('')}</div>`).join('');
+
   const ruleChip = r => `<span class="rchip ${r.pct_false >= 50 ? 'lf' : 'lv'}"><b>${h(r.it)}</b> ${h(r.en)} · ${Math.max(r.pct_false, 100 - r.pct_false)}%</span>`;
   const cardsKey = tid => `strada_cards:${state.user}:${tid}`;
   const cardsAt = tid => { try { return +localStorage.getItem(cardsKey(tid)) || 0; } catch (_) { return 0; } };
-  const CARD_BATCH = 4;
+  const CARD_GROUP = 12;                                        // cards between two tests; reading is one continuous run
+  const testedKey = tid => `strada_cards_tested:${state.user}:${tid}`;
 
   async function signsView() {
     setTab('home');
@@ -1039,7 +1123,8 @@
     const signs = d.topics.filter(t => t.sign), others = d.topics.filter(t => !t.sign);
     app.innerHTML = bar('#/', 'Sign cards') + `
       <h1>Sign cards</h1>
-      <div class="card"><p style="margin:0"><b>Half the exam bank is signs.</b> Each sign has about 5 true statements. Learn those from its card and everything else about that sign is Falso. Cards come ${CARD_BATCH} at a time, then a quick check on those ${CARD_BATCH}.</p></div>${gap(12)}
+      <div class="card"><p style="margin:0"><b>Half the exam bank is signs.</b> Each sign has about 5 true statements. Learn those from its card and everything else about that sign is Falso. Read the cards in one run; a test comes after each group of ${CARD_GROUP}, or whenever you ask for one.</p></div>${gap(12)}
+      <details class="card" open><summary><b>Sign cheat sheet</b> <span class="small muted">· when unsure, shape and colour tell you the type</span></summary>${gap(8)}${cheatHtml()}</details>${gap(12)}
       <div class="stack">${signs.map(fam).join('')}</div>${gap(16)}
       <h2>Other topics</h2><p class="small muted">The same cards work without a picture: each stop's true statements, then a check.</p>
       <div class="stack">${others.map(fam).join('')}</div>`;
@@ -1054,13 +1139,17 @@
     if (!n) { app.innerHTML = bar('#/signs', 'Cards') + `<div class="empty">No cards in this topic.</div>`; return; }
     let i = Math.min(cardsAt(tid), n - 1);
     if (cardsAt(tid) >= n) i = 0;
-    const save = v => { try { localStorage.setItem(cardsKey(tid), v); } catch (_) { /* ignore */ } };
-    const batchStart = k => k - (k % CARD_BATCH);
+    const get = k => { try { return +localStorage.getItem(k) || 0; } catch (_) { return 0; } };
+    const put = (k, v) => { try { localStorage.setItem(k, v); } catch (_) { /* ignore */ } };
+    let tested = Math.min(get(testedKey(tid)), i);                // cards before this index have been tested
+    const groups = Math.ceil(n / CARD_GROUP);
 
     function card() {
-      const s = stops[i], lie = s.lies[(i * 7) % Math.max(1, s.lies.length)], end = Math.min(batchStart(i) + CARD_BATCH, n), last = i === end - 1;
+      put(cardsKey(tid), i);
+      const s = stops[i], lie = s.lies[(i * 7) % Math.max(1, s.lies.length)], g = Math.floor(i / CARD_GROUP);
+      const groupEnd = Math.min((g + 1) * CARD_GROUP, n), atGroupEnd = i === groupEnd - 1, untested = i + 1 - tested;
       app.innerHTML = bar('#/signs', d.topic.title_en) + `
-        <div class="row" style="align-items:baseline"><strong>Card ${i + 1} of ${n}</strong><span class="muted small" style="text-align:right">check after card ${end}</span></div>
+        <div class="row" style="align-items:baseline"><strong>Card ${i + 1} of ${n}</strong><span class="muted small" style="text-align:right">group ${g + 1} of ${groups} · test after card ${groupEnd}</span></div>
         <div class="progress"><i style="width:${Math.round(100 * i / n)}%"></i></div>
         <div class="card tcard">
           ${s.image_url ? `<div class="figure"><img src="${h(s.image_url)}" alt=""></div>` : ''}
@@ -1069,25 +1158,31 @@
           <div class="truths">${s.truths.map(q => `<div class="truth"><span class="tick">✓</span><div><div>${highlight(q.q_it, q.trap_words, true, false)}</div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}</div><button class="say" data-say="${h(q.q_it)}" aria-label="Listen">🔊</button></div>`).join('')}</div>
           ${lie ? `<div class="lie"><span class="tick">✗</span><div><div class="small muted">A typical lie about this one (${s.lies.length} in the bank):</div><div>${highlight(lie.q_it, lie.trap_words, true, tid)}</div>${lie.q_en ? `<div class="small muted">${h(lie.q_en)}</div>` : ''}</div></div>` : ''}
         </div>${gap(12)}
-        <div class="row"><button class="btn" id="cprev" ${i === batchStart(i) ? 'disabled' : ''}>‹ Back</button><button class="btn primary" id="cnext">${last ? `Check these ${end - batchStart(i)} ›` : 'Next ›'}</button></div>`;
-      document.getElementById('cprev').onclick = () => { i--; card(); window.scrollTo(0, 0); };
-      document.getElementById('cnext').onclick = () => { if (last) check(batchStart(i), end); else { i++; card(); window.scrollTo(0, 0); } };
+        <div class="row"><button class="btn" id="cprev" ${i === 0 ? 'disabled' : ''}>‹ Back</button>
+          ${atGroupEnd ? `<button class="btn primary" id="ctest">Test these ${untested} ›</button>` : `<button class="btn primary" id="cnext">Next ›</button>`}</div>
+        ${gap(10)}<div class="stack">
+          ${atGroupEnd && i + 1 < n ? `<button class="btn quiet" id="cnext">Keep reading, test later ›</button>` : ''}
+          ${!atGroupEnd && untested > 1 ? `<button class="btn quiet" id="ctest">Test me now on the ${untested} cards I've read</button>` : ''}</div>`;
+      const go = k => { i = k; card(); window.scrollTo(0, 0); };
+      document.getElementById('cprev').onclick = () => go(i - 1);
+      const nx = document.getElementById('cnext'); if (nx) nx.onclick = () => go(i + 1);
+      const ts = document.getElementById('ctest'); if (ts) ts.onclick = () => check(tested, i + 1);
     }
     function check(from, to) {
       const qs = [];
-      for (const s of stops.slice(from, to)) { const t = shuffle(s.truths), l = shuffle(s.lies); qs.push(...t.slice(0, 2), ...l.slice(0, 2)); }
+      for (const s of stops.slice(from, to)) { const t = shuffle(s.truths), l = shuffle(s.lies); qs.push(...t.slice(0, 1), ...l.slice(0, 1)); }
       runDrill({
-        questions: shuffle(qs), back: `#/cards/${tid}`, crumb: `${d.topic.title_en} · check`,
+        questions: shuffle(qs), back: `#/cards/${tid}`, crumb: `${d.topic.title_en} · test`,
         onFinish: res => {
           const done = to >= n;
-          save(done ? n : to);
-          app.innerHTML = bar('#/signs', `${d.topic.title_en} · check`) + `
-            <div class="result"><div class="big" style="color:${res.pct >= 90 ? 'var(--green)' : res.pct >= 75 ? 'var(--ink)' : 'var(--red)'}">${res.pct}%</div><p class="muted">first-try · cards ${from + 1}–${to} of ${n}</p></div>
+          tested = to; put(testedKey(tid), done ? 0 : to); put(cardsKey(tid), done ? n : to);
+          app.innerHTML = bar('#/signs', `${d.topic.title_en} · test`) + `
+            <div class="result"><div class="big" style="color:${res.pct >= 90 ? 'var(--green)' : res.pct >= 75 ? 'var(--ink)' : 'var(--red)'}">${res.pct}%</div><p class="muted">first-try · cards ${from + 1}–${to} of ${n} · ${res.total} questions</p></div>
             ${res.missed.length ? `<h3>Missed</h3>${gap(8)}<div class="list">${missedHtml(res.missed)}</div>${gap(12)}` : '<div class="card"><strong>Clean.</strong></div>' + gap(12)}
-            <div class="stack">${done ? `<button class="btn primary" data-go="#/signs">Family done · back to the families</button>` : `<button class="btn primary" id="cgo">Next ${Math.min(CARD_BATCH, n - to)} cards ›</button>`}
-              <button class="btn" id="cre">See these ${to - from} cards again</button><button class="btn quiet" data-go="#/signs">Stop for now</button></div>`;
+            <div class="stack">${done ? `<button class="btn primary" data-go="#/signs">Family done · back to the families</button>` : `<button class="btn primary" id="cgo">Carry on from card ${to + 1} ›</button>`}
+              <button class="btn" id="cre">Read cards ${from + 1}–${to} again</button><button class="btn quiet" data-go="#/signs">Stop for now</button></div>`;
           const go = document.getElementById('cgo'); if (go) go.onclick = () => { i = to; card(); window.scrollTo(0, 0); };
-          document.getElementById('cre').onclick = () => { i = from; card(); window.scrollTo(0, 0); };
+          document.getElementById('cre').onclick = () => { tested = from; i = from; card(); window.scrollTo(0, 0); };
         },
       });
     }

@@ -288,3 +288,11 @@ span.lv, b.lv { color: var(--green); font-weight: 700; }
 .numg summary { cursor: pointer; }
 .numhead { font-weight: 800; font-size: 18px; margin: 10px 0 2px; color: var(--blue); }
 b.num { color: var(--blue); }
+
+.rchip.cue { background: var(--blue-soft); color: var(--blue); }
+b.cue { color: var(--blue); }
+.cheath { margin: 14px 0 6px; font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.cheat { display: grid; gap: 10px; }
+.cheatrow { display: flex; gap: 12px; align-items: flex-start; }
+.cheatrow svg { flex: none; margin-top: 2px; }
+details.card > summary { cursor: pointer; }
