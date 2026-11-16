@@ -1103,7 +1103,6 @@
   const ruleChip = r => `<span class="rchip ${r.pct_false >= 50 ? 'lf' : 'lv'}"><b>${h(r.it)}</b> ${h(r.en)} · ${Math.max(r.pct_false, 100 - r.pct_false)}%</span>`;
   const cardsKey = tid => `strada_cards:${state.user}:${tid}`;
   const cardsAt = tid => { try { return +localStorage.getItem(cardsKey(tid)) || 0; } catch (_) { return 0; } };
-  const CARD_GROUP = 12;                                        // cards between two tests; reading is one continuous run
   const testedKey = tid => `strada_cards_tested:${state.user}:${tid}`;
 
   async function signsView() {
@@ -1123,7 +1122,7 @@
     const signs = d.topics.filter(t => t.sign), others = d.topics.filter(t => !t.sign);
     app.innerHTML = bar('#/', 'Sign cards') + `
       <h1>Sign cards</h1>
-      <div class="card"><p style="margin:0"><b>Half the exam bank is signs.</b> Each sign has about 5 true statements. Learn those from its card and everything else about that sign is Falso. Read the cards in one run; a test comes after each group of ${CARD_GROUP}, or whenever you ask for one.</p></div>${gap(12)}
+      <div class="card"><p style="margin:0"><b>Half the exam bank is signs.</b> Each sign has about 5 true statements. Learn those from its card and everything else about that sign is Falso. Read the cards in one run; the test comes after the last card, or earlier if you ask for one.</p></div>${gap(12)}
       <details class="card" open><summary><b>Sign cheat sheet</b> <span class="small muted">· when unsure, shape and colour tell you the type</span></summary>${gap(8)}${cheatHtml()}</details>${gap(12)}
       <div class="stack">${signs.map(fam).join('')}</div>${gap(16)}
       <h2>Other topics</h2><p class="small muted">The same cards work without a picture: each stop's true statements, then a check.</p>
@@ -1142,14 +1141,13 @@
     const get = k => { try { return +localStorage.getItem(k) || 0; } catch (_) { return 0; } };
     const put = (k, v) => { try { localStorage.setItem(k, v); } catch (_) { /* ignore */ } };
     let tested = Math.min(get(testedKey(tid)), i);                // cards before this index have been tested
-    const groups = Math.ceil(n / CARD_GROUP);
 
     function card() {
       put(cardsKey(tid), i);
-      const s = stops[i], lie = s.lies[(i * 7) % Math.max(1, s.lies.length)], g = Math.floor(i / CARD_GROUP);
-      const groupEnd = Math.min((g + 1) * CARD_GROUP, n), atGroupEnd = i === groupEnd - 1, untested = i + 1 - tested;
+      const s = stops[i], lie = s.lies[(i * 7) % Math.max(1, s.lies.length)];
+      const atGroupEnd = i === n - 1, untested = i + 1 - tested;      // one test, after the last card
       app.innerHTML = bar('#/signs', d.topic.title_en) + `
-        <div class="row" style="align-items:baseline"><strong>Card ${i + 1} of ${n}</strong><span class="muted small" style="text-align:right">group ${g + 1} of ${groups} · test after card ${groupEnd}</span></div>
+        <div class="row" style="align-items:baseline"><strong>Card ${i + 1} of ${n}</strong><span class="muted small" style="text-align:right">test after the last card</span></div>
         <div class="progress"><i style="width:${Math.round(100 * i / n)}%"></i></div>
         <div class="card tcard">
           ${s.image_url ? `<div class="figure"><img src="${h(s.image_url)}" alt=""></div>` : ''}
