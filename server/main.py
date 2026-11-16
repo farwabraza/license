@@ -1012,8 +1012,8 @@ def numbers():
         facts = sorted((r for r in mine if r[3]["answer"]), key=lambda r: (r[2], r[1], r[3]["topic_id"]))
         if mine:
             groups.append({"id": gid, "title": title, "statements": len(mine),
-                           "facts": [dict(q_brief(q), topic_id=q["topic_id"], topic=topics[q["topic_id"]]["title_en"],
-                                          num=f"{v:g} {u}") for _, v, u, q in facts]})
+                           "facts": [dict(with_picture(q), topic_id=q["topic_id"], topic=topics[q["topic_id"]]["title_en"],
+                                          pictured=bool(RE_PICTURE.search(q_text(q))), num=f"{v:g} {u}") for _, v, u, q in facts]})
     return {"groups": groups, "statements": len(rows)}
 
 
@@ -1023,6 +1023,18 @@ def numbers_drill(group: str = "", n: int = 20):
     if not qs:
         raise HTTPException(404, "no number statements")
     return {"questions": copies(random.sample(qs, min(len(qs), max(5, min(n, 40)))))}
+
+
+RE_PICTURE = re.compile(r"raffigurat|rappresentat|in figura|\(fig")
+
+
+def with_picture(q):
+    """A brief question row whose picture is never missing when the statement is about one: a statement that says
+    "the sign shown" and has no figure of its own gets its stop's figure."""
+    row = q_brief(q)
+    if not row.get("image_url") and RE_PICTURE.search(q_text(q)):
+        row["image_url"] = (content("subtopics")["by_id"].get(q["subtopic_id"]) or {}).get("image_url")
+    return row
 
 
 def q_brief(q):
@@ -1043,7 +1055,7 @@ def trucchi():
         day_shuffle(exceptions, "trucchi-ex", rid)
         rules.append({"id": rid, "group": group, "it": it, "en": en, "tip": tip, "n": n, "false": f,
                       "pct_false": round(100 * f / n), "exceptions": len(exceptions),
-                      "examples": [q_brief(q) for q in exceptions[:3]]})
+                      "examples": [with_picture(q) for q in exceptions]})      # every one: they are what the trick gets wrong
     return {"groups": [{"id": g, "title": t, "verdict": v} for g, t, v in TRUCCHI_GROUPS], "rules": rules,
             "total": len(content("questions")["rows"])}
 
