@@ -1205,6 +1205,53 @@
     });
   }
 
+  // the numbers worth knowing by heart; every line is backed by true statements in the official bank
+  const KEY_NUMBERS = [
+    ['Speed limits for a car (km/h)', [
+      ['50', 'in town (centro abitato). <b>70</b> only where a sign allows it'],
+      ['90', 'secondary roads outside town (extraurbane secondarie)'],
+      ['110', 'main roads outside town (extraurbane principali). <b>90</b> in rain or hail'],
+      ['130', 'motorway (autostrada). <b>110</b> in rain. <b>150</b> only where a sign allows it'],
+      ['100 / 90', 'licence held under 3 years: 100 on motorways, 90 on main roads'],
+      ['70 / 80', 'car with a caravan or trailer: 70 outside town, 80 on motorways'],
+      ['45 · 40', 'mopeds (ciclomotori) 45 · farm and work machines 40'],
+      ['50', 'the most a temporary limit can be in thick fog (visibility under 100 m)'],
+      ['+10 · +40', 'over the limit by more than 10: you lose points. By more than 40: licence suspended'],
+    ]],
+    ['Speed to distance', [
+      ['50 → 14 m', 'metres travelled in one second, and the minimum safe distance'],
+      ['100 → 28 m', 'same rule'],
+      ['130 → 36 m', 'same rule (30 → 9 m, 150 → 42 m)'],
+    ]],
+    ['Distances', [
+      ['50 m', 'warning triangle at least 50 m behind the vehicle · rear fog light when visibility is under 50 m'],
+      ['100 m', 'the triangle must be visible from 100 m · gap between lorries over 3.5 t when overtaking is banned'],
+      ['150 m', 'a warning sign normally stands 150 m before the danger'],
+      ['5 m', 'no parking within 5 m of a junction in town, or of a fuel station while open'],
+      ['15 m', 'no parking within 15 m of a bus stop sign when the bay is not marked'],
+      ['20 m', 'stay 20 m behind a snowplough or salt spreader at work'],
+      ['500 m', 'in a motorway jam, the emergency lane may be used to exit only from the 500 m exit sign'],
+      ['50 cm', 'a load on a motorcycle may stick out sideways by 50 cm at most'],
+      ['24 hours', 'longest stay in a motorway service area'],
+    ]],
+    ['Licences and vehicles', [
+      ['14', 'AM (mopeds: up to 50 cm³ and 45 km/h)'],
+      ['16', 'A1 (up to 125 cm³, 11 kW) and B1'],
+      ['18', 'A2 (up to 35 kW)'],
+      ['20 / 24', 'A: at 20 after 2 years of A2, or at 24 directly'],
+      ['21', 'tricycles over 15 kW'],
+      ['3.5 t', 'B licence: vehicles up to 3.5 tonnes, at most 8 passengers plus the driver'],
+      ['750 kg', 'a light trailer (rimorchio leggero). With a heavier one the whole combination stays within 3.5 t'],
+      ['80 km/h · 150 cm³', 'to use a motorway: a car must be able to do 80, a motorcycle must be at least 150 cm³'],
+    ]],
+    ['Licence points', [
+      ['20', 'points you start with, and the maximum a course can bring you back to'],
+      ['6', 'points recovered with a course and exam'],
+      ['15', 'the most you can lose at one time (unless the licence is suspended)'],
+      ['2 years', 'with no offences, you are back to 20'],
+    ]],
+  ];
+
   // ---------- numbers: every figure on one sheet, then a numbers-only drill ----------
   async function numbersView() {
     setTab('home');
@@ -1212,16 +1259,21 @@
     let d; try { d = await api('/api/numbers'); } catch (e) { app.innerHTML = errorCard(e, '#/numbers'); return; }
     if (location.hash !== '#/numbers') return;
     const bold = (q) => h(q.q_it).replace(/(\d+(?:[.,]\d+)?\s*(?:km\/h|[\p{L}%\/]+\d?))/u, '<b class="num">$1</b>');
-    const group = g => { let last = '';
-      return `<details class="card numg" ${g.id === 'speed' ? 'open' : ''}><summary><b>${h(g.title)}</b> <span class="muted small">· ${g.facts.length} true facts · ${g.statements} statements</span></summary>
+    const fact = q => `<div class="item">${q.image_url ? `<div class="numfig"><img src="${h(q.image_url)}" alt="" loading="lazy"><span class="small muted">True for this picture only</span></div>` : q.pictured ? '<div class="small no">Picture missing: this one is only true for its sign.</div>' : ''}<div>${bold(q)}</div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}<div class="small muted">${h(q.topic)}</div></div>`;
+    const listed = facts => { let last = ''; return facts.map(q => { const head = q.num !== last ? `<div class="numhead">${h(q.num)}</div>` : ''; last = q.num; return head + fact(q); }).join(''); };
+    const group = g => { const rules = g.facts.filter(q => !q.pictured);
+      return rules.length ? `<details class="card numg"><summary><b>${h(g.title)}</b> <span class="muted small">· ${rules.length} statements</span></summary>
         <button class="btn small" data-go="#/numdrill/${g.id}" style="margin:10px 0">Drill ${h(g.title.toLowerCase())}</button>
-        <div class="list">${g.facts.map(q => { const head = q.num !== last ? `<div class="numhead">${h(q.num)}</div>` : ''; last = q.num;
-          return `${head}<div class="item">${q.image_url ? `<div class="numfig"><img src="${h(q.image_url)}" alt="" loading="lazy"><span class="small muted">True for this picture only</span></div>` : q.pictured ? '<div class="small no">Picture missing: this one is only true for its sign.</div>' : ''}<div>${bold(q)}</div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}<div class="small muted">${h(q.topic)}</div></div>`; }).join('')}</div></details>`; };
+        <div class="list">${listed(rules)}</div></details>` : ''; };
+    const pictured = d.groups.flatMap(g => g.facts.filter(q => q.pictured));
     app.innerHTML = bar('#/', 'Numbers') + `
       <h1>Numbers</h1>
-      <div class="card"><p style="margin:0">No trick works on a number: the same figure is true in one statement and false in the next. These are all the <b>true</b> ones, ${d.groups.reduce((a, g) => a + g.facts.length, 0)} facts. If the exam shows a different number for the same thing, it is Falso.</p></div>${gap(12)}
-      <button class="btn primary" data-go="#/numdrill/all">Drill all numbers · 20 questions</button>${gap(12)}
-      <div class="stack">${d.groups.map(group).join('')}</div>`;
+      <div class="card"><p style="margin:0"><b>Learn this page and you know the numbers.</b> No trick works on a number: if the exam shows a different figure for the same thing, it is Falso.</p></div>${gap(12)}
+      ${KEY_NUMBERS.map(([title, rows]) => `<div class="card keynum"><h3 style="margin-top:0">${h(title)}</h3>${rows.map(([n, what]) => `<div class="krow"><b class="num">${h(n)}</b><span>${what}</span></div>`).join('')}</div>`).join(gap(10))}${gap(12)}
+      <button class="btn primary" data-go="#/numdrill/all">Drill all numbers · 20 questions</button>${gap(16)}
+      <h2>The full statements</h2><p class="small muted">Only if you have time. Every true statement behind the page above, in Italian, as the exam words it.</p>
+      <div class="stack">${d.groups.map(group).join('')}
+        ${pictured.length ? `<details class="card numg"><summary><b>Numbers that depend on a sign</b> <span class="muted small">· ${pictured.length} statements, each with its picture</span></summary><div class="list" style="margin-top:10px">${listed(pictured)}</div></details>` : ''}</div>`;
   }
   async function numbersDrill(gid) {
     setTab('home');
