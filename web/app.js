@@ -959,8 +959,8 @@
         <div class="tbar" title="${100 - pf}% Vero, ${pf}% Falso"><i class="v" style="width:${100 - pf}%"></i><i class="f" style="width:${pf}%"></i></div>
         <div class="small muted">${r.n} statements · ${r.n - r.false} Vero · ${r.false} Falso</div>
         <p style="margin:8px 0">${h(r.tip)}</p>
-        ${r.examples.length && sure >= 75 ? `<details><summary class="small"><b>${r.exceptions} exception${r.exceptions > 1 ? 's' : ''} to learn</b>: ${leanF ? 'true' : 'false'} despite the word</summary>
-          <div class="list" style="margin-top:8px">${r.examples.map(q => `<div class="item"><div>${h(q.q_it)} <span class="small ${q.answer ? 'ok' : 'no'}">→ ${q.answer ? 'Vero' : 'Falso'}</span></div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}</div>`).join('')}</div></details>` : ''}
+        ${r.examples.length && sure >= 75 ? `<details><summary class="small"><b>${r.exceptions > 1 ? `All ${r.exceptions} exceptions` : 'The 1 exception'}</b>: ${leanF ? 'true' : 'false'} despite the word</summary>
+          <div class="list" style="margin-top:8px">${r.examples.map(q => `<div class="item">${q.image_url ? `<img class="thumb" src="${h(q.image_url)}" alt="" loading="lazy">` : ''}<div>${h(q.q_it)} <span class="small ${q.answer ? 'ok' : 'no'}">→ ${q.answer ? 'Vero' : 'Falso'}</span></div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}</div>`).join('')}</div></details>` : ''}
         <button class="btn small" data-go="#/trucco/${r.id}" style="margin-top:8px">Drill ${Math.min(r.n, 30)}${r.exceptions && sure >= 75 ? ' · exceptions first' : ''}</button>
       </div>`;
     };
@@ -1216,7 +1216,7 @@
       return `<details class="card numg" ${g.id === 'speed' ? 'open' : ''}><summary><b>${h(g.title)}</b> <span class="muted small">· ${g.facts.length} true facts · ${g.statements} statements</span></summary>
         <button class="btn small" data-go="#/numdrill/${g.id}" style="margin:10px 0">Drill ${h(g.title.toLowerCase())}</button>
         <div class="list">${g.facts.map(q => { const head = q.num !== last ? `<div class="numhead">${h(q.num)}</div>` : ''; last = q.num;
-          return `${head}<div class="item">${q.image_url ? `<img class="thumb" src="${h(q.image_url)}" alt="" loading="lazy">` : ''}<div>${bold(q)}</div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}<div class="small muted">${h(q.topic)}</div></div>`; }).join('')}</div></details>`; };
+          return `${head}<div class="item">${q.image_url ? `<div class="numfig"><img src="${h(q.image_url)}" alt="" loading="lazy"><span class="small muted">True for this picture only</span></div>` : q.pictured ? '<div class="small no">Picture missing: this one is only true for its sign.</div>' : ''}<div>${bold(q)}</div>${q.q_en ? `<div class="small muted">${h(q.q_en)}</div>` : ''}<div class="small muted">${h(q.topic)}</div></div>`; }).join('')}</div></details>`; };
     app.innerHTML = bar('#/', 'Numbers') + `
       <h1>Numbers</h1>
       <div class="card"><p style="margin:0">No trick works on a number: the same figure is true in one statement and false in the next. These are all the <b>true</b> ones, ${d.groups.reduce((a, g) => a + g.facts.length, 0)} facts. If the exam shows a different number for the same thing, it is Falso.</p></div>${gap(12)}

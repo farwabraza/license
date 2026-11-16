@@ -296,3 +296,5 @@ b.cue { color: var(--blue); }
 .cheatrow { display: flex; gap: 12px; align-items: flex-start; }
 .cheatrow svg { flex: none; margin-top: 2px; }
 details.card > summary { cursor: pointer; }
+.numfig { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.numfig img { width: 110px; height: 110px; object-fit: contain; background: #fff; border-radius: 10px; border: 1px solid var(--line); flex: none; }
